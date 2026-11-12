@@ -15,6 +15,7 @@ const MEMO_EVERY := 4          # 사용자가 이만큼 답하면 기억 메모�
 const MEMO_CHARS := 800
 const OUT_TOKENS := 320
 
+const NUDGE_SHOW := 15.0       # 캐릭터가 혼자 먼저 건 말이 떠 있는 시간(초)
 const SHOW_TIME := 5.0         # 말이 떠 있는 시간(초). 이 안에 글씨를 누르면 답장할 수 있다.
 
 enum { HIDDEN, SHOW, REPLY, KEY }
@@ -341,7 +342,8 @@ func _nudge(poked: bool) -> void:
 		_push("m", text)
 		state.turns[-1]["n"] = true      # 먼저 건 말(아직 답을 못 받음)
 		_save()
-		say(text)
+		# 혼자 먼저 건 말은 사용자가 못 보고 지나치기 쉬워서 더 오래 띄운다.
+		say(text, 0.0 if poked else NUDGE_SHOW)
 	if _call(_system(), prompt, OUT_TOKENS, done):
 		if poked:
 			_open("…", SHOW)

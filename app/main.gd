@@ -75,7 +75,6 @@ var greet_next := 25.0         # 다음 저절로 인사까지(초)
 var greet_want := false        # 말을 걸 때: 서 있으면 정면으로 돌아서 인사하기
 var greet_want_t := 0.0
 var greet_log := false
-var greet_key := false         # 임시: a 로 인사를 시작해 아직 a 를 누르고 있다(그동안 a 로 걷지 않는다)
 
 # 혼자 돌아다니기
 var wander := false
@@ -905,15 +904,12 @@ func _menu_icon() -> Texture2D:
 # ---------------------------------------------------------------- 입력과 이동
 
 func _input(event: InputEvent) -> void:
-	if event is InputEventKey and event.pressed and not event.echo and event.physical_keycode == KEY_A \
+	if event is InputEventKey and event.pressed and not event.echo and event.physical_keycode == KEY_X \
 			and not talk.typing and greet_t < 0.0 and jump_u < 0.0 and anim_speed < 5.0 \
 			and absf(angle_difference(yaw, 0.0)) < 0.12:
-		# 임시(나중에 지울 것): 정면을 보고 서 있을 때 a 를 누르면 인사한다. 그동안 a 로는 걷지 않는다.
-		greet_key = true
+		# 임시(나중에 지울 것): 정면을 보고 서 있을 때 x 를 누르면 인사한다.
 		_start_greet()
 		return
-	if event is InputEventKey and not event.pressed and event.physical_keycode == KEY_A:
-		greet_key = false
 	if event is InputEventKey and event.pressed and not event.echo:
 		# 방향키를 둘 같이 누르면 사선 대신 나중에 누른 축으로만 간다.
 		if event.physical_keycode in [KEY_LEFT, KEY_RIGHT, KEY_A, KEY_D]:
@@ -939,8 +935,6 @@ func _input(event: InputEvent) -> void:
 
 
 func _key(a: Key, b: Key) -> float:
-	if b == KEY_A and greet_key and not Input.is_physical_key_pressed(KEY_LEFT):
-		return 0.0
 	if talk.typing:
 		return 0.0
 	return 1.0 if Input.is_physical_key_pressed(a) or Input.is_physical_key_pressed(b) or a in demo_keys else 0.0

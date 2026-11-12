@@ -8,7 +8,28 @@
 
 - 3D 모델: Tripo P2 결과를 채택. 리깅까지 끝남 → `preview/p2f_walk.glb`
 - 걷기: 참조 이미지(`reference/walk_reference.webp`)에 맞춰 코드로 직접 만든 걷기가 동작함 → `out/walk_custom.gif`
-- 아직 없는 것: 대기·달리기·점프 동작, 키보드 조작, 실제 앱 프로젝트
+- 맥 메뉴바 앱: `app/` (Godot 4). 화면 위에 키 120pt 캐릭터가 떠서 키보드로 걷고 뛰고 점프함
+- 아직 없는 것: 안드로이드 빌드, 가방 가중치 손보기, 표정 변화
+
+## 맥 메뉴바 앱 (`app/`)
+
+- 180×210pt 투명·테두리 없는·항상 위 창 하나에 캐릭터를 그리고, 걸을 때 창 자체를 움직인다. 캐릭터 둘레 말고는 클릭이 아래 앱으로 통과한다(`HIT_RECT`).
+- 조작: 방향키·WASD 이동(물리 키 기준이라 한글 입력 상태에서도 됨), Shift 달리기, Space 점프. 캐릭터를 클릭해야 키보드 포커스를 받는다. 끌어서 옮기기, 우클릭으로 메뉴.
+- 메뉴바 아이콘: `DisplayServer.create_status_indicator` + `NativeMenu`. 생성은 확인했지만(로그 `status indicator 0 feature true`) 이 회사 맥에서는 노치·메뉴바 정리 앱 때문에 눈으로 보이지 않았다. 그래서 우클릭 메뉴를 같이 둔다.
+- Dock 아이콘 숨김: `export_presets.cfg`의 `application/additional_plist_content`로 `LSUIElement` 넣음.
+- 동작은 전부 `main.gd`의 `_pose(w, run, ph, t, j)` 하나로 만든다. 대기↔걷기↔달리기는 수치를 섞어서 끊김 없이 넘어가고, 걸음 주기는 실제 이동 속도로 정해서 발이 미끄러지지 않는다.
+- 옆으로 걸을 때 완전한 옆모습이면 오른쪽 머리카락이 얼굴을 가려서 70도 정도만 돌린다.
+
+```bash
+app/build_mac.sh                                    # build/37RHHG.app 생성(임시 서명)
+open build/37RHHG.app                               # 실행
+open build/37RHHG.app --args -- --demo              # 자동으로 걷기·달리기·점프를 반복
+cd app && godot --path . --quit-after 600 -- --snapshot   # 자세 8개를 app/snap/에 PNG로
+```
+
+- 내보내기에는 `textures/vram_compression/import_etc2_astc=true`가 필요하다(없으면 arm64/universal 내보내기 거부).
+- 개발 실행(`godot --path app`)은 Godot 번들로 떠서 Dock에 Godot 아이콘이 보이고, 컴퓨터 사용 도구로 창을 잡을 수 없다. 화면 확인은 내보낸 .app으로 한다.
+- 컴퓨터 사용 도구의 키 입력은 누르고 바로 떼서 걷기 시험이 안 된다. 움직임 확인은 `--demo`로.
 
 ## 폴더
 
@@ -60,7 +81,6 @@ python3 mkgif.py custom 36 # custom.gif 와 custom_sheet.png 생성 (Pillow 필�
 
 ## 다음 할 일
 
-1. 대기·달리기·점프 동작을 걷기와 같은 방식으로 작성
-2. Godot 앱 프로젝트 구성: 방향키 이동, Shift 달리기, Space 점프, 동작 사이 전환
-3. macOS 내보내기 확인 후 Android 내보내기
-4. 필요하면 가방 가중치 손보기
+1. 집 맥에서 메뉴바 아이콘이 보이는지 확인
+2. Android 내보내기(터치 조작 필요)
+3. 필요하면 가방 가중치 손보기

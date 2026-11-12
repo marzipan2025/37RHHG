@@ -9,6 +9,7 @@ const FEET_Y := 192.0         # 창 안에서 발이 닿는 높이
 const CHAR_H := 120.0         # 화면에 보이는 키
 const MODEL_H := 1.7          # 모델 키(월드 단위)
 const CAM_PITCH := 10.0       # 살짝 위에서 내려다보는 각도
+const FACE_Y := 70.0          # 얼굴 확대 스냅샷의 중심 높이(발에서 pt)
 
 const WALK_SPEED := 80.0      # pt/s
 const RUN_SPEED := 210.0
@@ -41,6 +42,12 @@ var popup_menu := RID()
 var jump_long := false
 var jump_cool := 0.0
 
+# 서 있을 때 머리를 좌우로 돌려 두리번거린다(±LOOK_MAX 도).
+const LOOK_MAX := 30.0
+var look := 0.0                # 지금 머리 좌우 각도(도, +가 캐릭터 왼쪽)
+var look_target := 0.0
+var look_timer := 1.0
+
 # 혼자 돌아다니기
 var wander := false
 var wander_idx := -1
@@ -69,6 +76,16 @@ var unit := 1.0                # 골격 공간의 1cm
 var k := MODEL_H / CHAR_H      # pt → 월드 단위
 
 var snapshot := false
+var cam: Camera3D
+
+# 얼굴 덧그리기(face.gdshader). 서기·걷기는 원래 얼굴.
+# 달리기·점프 때는 감은 눈(^ ^)과 벌린 입이 각각 따로, 가끔 잠깐씩만 나온다.
+var face_mat: ShaderMaterial
+var face_act := 0              # 0 서기·걷기, 1 달리기, 2 점프
+var eyes_left := 0.0           # 감은 눈이 남은 시간
+var mouth_left := 0.0          # 벌린 입이 남은 시간
+var eyes_next := 3.0           # 달리는 중 다음 감은 눈 기회까지
+var mouth_next := 3.0
 
 
 func _ready() -> void:
@@ -196,7 +213,7 @@ func _build_scene() -> void:
 	shadow.material_override = sm
 	add_child(shadow)
 
-	var cam := Camera3D.new()
+	cam = Camera3D.new()
 	cam.projection = Camera3D.PROJECTION_ORTHOGONAL
 	cam.size = WIN_H * k
 	var p := deg_to_rad(CAM_PITCH)
@@ -214,13 +231,13 @@ func _matte(n: Node) -> void:
 		for s in n.mesh.get_surface_count():
 			var src: Material = n.mesh.surface_get_material(s)
 			if src is BaseMaterial3D:
-				var m: BaseMaterial3D = src.duplicate()
-				m.metallic = 0.0
-				m.metallic_texture = null
-				m.roughness = 1.0
-				m.roughness_texture = null
-				m.normal_enabled = false
+				# 무광 + 얼굴 덧그리기를 셰이더 하나로 한다.
+				var m := ShaderMaterial.new()
+				m.shader = load("res://face.gdshader")
+				m.set_shader_parameter("albedo_tex", src.albedo_texture)
+				m.set_shader_parameter("albedo_col", src.albedo_color)
 				n.set_surface_override_material(s, m)
+				face_mat = m
 	for c in n.get_children():
 		_matte(c)
 
@@ -515,7 +532,65 @@ func _process(dt: float) -> void:
 	var run := clampf((anim_speed - WALK_SPEED) / (RUN_SPEED - WALK_SPEED), 0.0, 1.0)
 	if jump_u < 0.0:
 		phase = fposmod(phase + anim_speed / lerpf(WALK_STRIDE, RUN_STRIDE, run) * dt, 1.0)
+
+	# 두리번거리기: 몇 초마다 새 방향을 고르고 천천히 돌린다. 걸을 때는 앞을 본다.
+	look_timer -= dt
+	if look_timer <= 0.0:
+		look_timer = randf_range(1.2, 3.5)
+		look_target = 0.0 if randf() < 0.35 else randf_range(-LOOK_MAX, LOOK_MAX)
+	look = lerpf(look, look_target * (1.0 - w), 1.0 - exp(-4.0 * dt))
+	_face_step(dt, 2 if jump_u >= 0.0 else (1 if run > 0.5 else 0))
 	_pose(w, run, phase, clock, j, leap)
+
+
+# ---------------------------------------------------------------- 표정
+
+# 감은 눈과 벌린 입은 따로 정한다.
+# 달리는 동안: 각자 3~8초마다 한 번씩 기회가 오고, 그때 확률로 0.5~1.3초 동안만 나온다.
+# 점프: 뛸 때마다 따로 확률을 굴려 그 점프 동안만 나온다.
+const RUN_EYES := 0.25
+const RUN_MOUTH := 0.35
+const JUMP_EYES := 0.25
+const JUMP_MOUTH := 0.3
+
+
+func _face_step(dt: float, act: int) -> void:
+	eyes_left -= dt
+	mouth_left -= dt
+	if act != face_act:
+		if face_act == 2:
+			# 점프 표정은 착지하면 끝낸다.
+			eyes_left = 0.0
+			mouth_left = 0.0
+		face_act = act
+		if act == 2:
+			var dur := LEAP_TIME if jump_long else JUMP_TIME
+			if randf() < JUMP_EYES:
+				eyes_left = dur
+			if randf() < JUMP_MOUTH:
+				mouth_left = dur
+		elif act == 0:
+			eyes_left = 0.0
+			mouth_left = 0.0
+	if act == 1:
+		eyes_next -= dt
+		mouth_next -= dt
+		if eyes_next <= 0.0:
+			eyes_next = randf_range(3.0, 8.0)
+			if randf() < RUN_EYES:
+				eyes_left = randf_range(0.5, 1.3)
+		if mouth_next <= 0.0:
+			mouth_next = randf_range(3.0, 8.0)
+			if randf() < RUN_MOUTH:
+				mouth_left = randf_range(0.5, 1.3)
+	_face_set(0.0, 1.0 if eyes_left > 0.0 else 0.0, 0.6 if mouth_left > 0.0 else 0.0)
+
+
+func _face_set(bl: float, hap: float, mo: float) -> void:
+	if face_mat:
+		face_mat.set_shader_parameter("blink", bl)
+		face_mat.set_shader_parameter("happy", hap)
+		face_mat.set_shader_parameter("mouth", mo)
 
 
 # ---------------------------------------------------------------- 동작
@@ -568,7 +643,22 @@ func _pose(w: float, run: float, ph: float, t: float, j: float, leap := 0.0) -> 
 	_rot("Spine", Vector3.UP, -twist * 1.4 * sin(a0))
 	var nod := (-2.0 + 1.5 * cos(2.0 * a0)) * w - lean * 0.5 + 1.0 * breath * idle
 	var tilt := -2.0 * w * cos(a0) + 2.5 * sin(t * TAU * 0.13) * idle
-	_rot("Head", Vector3.UP, twist * 0.4 * sin(a0), Quaternion(lat, deg_to_rad(nod)) * Quaternion(fwd, deg_to_rad(tilt)))
+	var turn := twist * 0.4 * sin(a0) + clampf(look, -LOOK_MAX, LOOK_MAX)
+	_rot("Head", Vector3.UP, turn, Quaternion(lat, deg_to_rad(nod)) * Quaternion(fwd, deg_to_rad(tilt)))
+	_face_update()
+
+
+func _face_update() -> void:
+	# 셰이더가 쓰는 머리 좌표계: 원점은 머리 뼈, 축은 캐릭터의 왼쪽·위·앞.
+	if face_mat == null:
+		return
+	var hi: int = bones["Head"].i
+	var gp := skel.get_bone_global_pose(hi)
+	var rot := gp.basis.orthonormalized() * skel.get_bone_global_rest(hi).basis.orthonormalized().inverse()
+	var sk := skel.global_transform
+	var b := sk.basis.orthonormalized() * rot
+	var frame := Transform3D(Basis(b * lat, b * Vector3.UP, b * fwd), sk * gp.origin)
+	face_mat.set_shader_parameter("head_inv", Projection(frame.affine_inverse()))
 
 
 # ---------------------------------------------------------------- 확인용 스냅샷
@@ -586,11 +676,14 @@ func _take_snapshots() -> void:
 		["walk_back", PI, 1.0, 0.0, 0.0, 0.0],
 		["jump_front", -0.4, 0.0, 0.0, 0.0, 1.0],
 		["leap_side", PI * 0.4, 0.0, 0.0, 0.0, -1.0],
+		["look_left", 0.0, 0.0, 0.0, 0.0, 0.0, LOOK_MAX],
+		["look_right", 0.0, 0.0, 0.0, 0.0, 0.0, -LOOK_MAX],
 	]
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("res://snap"))
 	for s in shots:
 		model.rotation.y = s[1]
 		model.position.y = JUMP_H * k * absf(s[5])
+		look = s[6] if s.size() > 6 else 0.0
 		if s[5] < 0.0:
 			_pose(s[2], s[3], s[4], 0.0, 0.0, 1.0)
 		else:
@@ -598,4 +691,26 @@ func _take_snapshots() -> void:
 		await get_tree().process_frame
 		await RenderingServer.frame_post_draw
 		get_viewport().get_texture().get_image().save_png("res://snap/%s.png" % s[0])
+	# 얼굴 확대: 좌표 격자(debug)와 표정 몇 개
+	model.rotation.y = 0.0
+	model.position.y = 0.0
+	look = 0.0
+	_pose(0.0, 0.0, 0.0, 0.0, 0.0)
+	var full := cam.size
+	cam.size = 46.0 * k
+	cam.position += Vector3.UP * (FACE_Y - (FEET_Y - WIN_H * 0.5)) * k
+	var faces := [
+		["face_idle", 0.0, 0.0, 0.0, false],
+		["face_run", 0.0, 0.0, 0.6, false],
+		["face_jump", 0.0, 1.0, 0.6, false],
+		["face_eyes_only", 0.0, 1.0, 0.0, false],
+		["face_grid", 0.0, 1.0, 0.6, true],
+	]
+	for f in faces:
+		face_mat.set_shader_parameter("debug", f[4])
+		_face_set(f[1], f[2], f[3])
+		await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png("res://snap/%s.png" % f[0])
+	cam.size = full
 	get_tree().quit()

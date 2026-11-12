@@ -9,7 +9,8 @@
 - 3D 모델: Tripo P2 결과를 채택. 리깅까지 끝남 → `preview/p2f_walk.glb`
 - 걷기: 참조 이미지(`reference/walk_reference.webp`)에 맞춰 코드로 직접 만든 걷기가 동작함 → `out/walk_custom.gif`
 - 맥 메뉴바 앱: `app/` (Godot 4). 화면 위에 키 120pt 캐릭터가 떠서 키보드로 걷고 뛰고 점프함
-- 아직 없는 것: 안드로이드 빌드, 가방 가중치 손보기, 표정 변화
+- 표정: 셰이더로 얼굴에 덧그린 감은 눈(^ ^)과 벌린 입이 달리기·점프 때 가끔 나옴
+- 아직 없는 것: 안드로이드 빌드, 가방 가중치 손보기
 
 ## 맥 메뉴바 앱 (`app/`)
 
@@ -23,15 +24,27 @@
 - 창 경계 멀리뛰기: `helper/winwatch`(Swift)가 0.25초마다 다른 앱 창 위치를 `CGWindowListCopyWindowInfo`로 읽어 한 줄로 보내고, 앱이 `OS.execute_with_pipe`로 받아 스레드에서 읽는다. 발 위치와 앞쪽 지점이 어떤 창 안팎으로 갈리면 그 방향으로 0.85초 동안 높이 58pt로 멀리뛴다(뛴 뒤 1초는 다시 안 뜀). 혼자 돌아다니기 중에만 동작한다.
 - 좌표: CG 창 좌표는 주 화면 왼쪽 위가 원점인 pt. Godot 화면 좌표는 모든 화면을 합친 영역의 왼쪽 위가 원점인 px. 그래서 도우미가 합친 영역의 원점을 같이 보내고 `(cg - origin) * px_scale`로 바꾼다. 창 위치 읽기에는 화면 기록 권한이 필요 없다(창 이름만 필요).
 - 캐릭터는 지금 있는 화면 안에서만 돌아다닌다. 다른 모니터로 보내려면 끌어서 옮긴다.
+- 머리 두리번거리기: 서 있을 때 1.2~3.5초마다 좌우 ±30도(`LOOK_MAX`) 안에서 새 방향을 골라 천천히 돌린다. 걸으면 앞을 본다.
+
+### 표정 (`app/face.gdshader`)
+
+- 눈·입은 텍스처 그림이라 움직일 수 없고, 텍스처 아틀라스가 잘게 조각나 있어 바꿔 그린 텍스처를 끼우기도 어렵다. GL Compatibility라 Decal도 못 쓴다. 그래서 캐릭터 재질을 셰이더로 바꾸고, 머리 뼈 기준 좌표(cm, x 캐릭터 왼쪽·y 위·z 앞)로 앞에서 비추듯 원래 눈·입을 피부색으로 덮은 뒤 새 모양을 그린다. 머리 좌표는 `_face_update()`가 매 자세마다 `head_inv`로 넘긴다.
+- 감은 눈: 사용자가 그린 그림을 따른 적갈색 초승달(가운데 두껍고 끝 둥글게, 바깥 끝이 높고 바깥 위 속눈썹). 입: 중간 크기로 벌린 입 하나(`mouth` 0.6)만 쓴다.
+- 덮개 색은 단색이 아니라 아래로 볼터치 분홍이 번진다(`skin_at`). 눈을 감으면 덮개를 앞머리까지 위로 늘려 쌍꺼풀 선·속눈썹 그늘을 지운다.
+- 머리카락 판정: 앞머리는 그리지 않도록 붉은색은 건너뛴다. 단 눈동자 아래쪽도 붉어서 눈 가운데 아래는 판정을 끄고, 눈 위쪽은 그늘진 어두운 머리카락까지 머리카락으로 보되 아주 어두운 속눈썹은 뺀다.
+- 원래 눈 자리는 오목해서 안쪽 면이 옆·아래를 본다. 면 방향 조건(`hn.z`)을 좁게 두면 그 벽이 안 덮여 흔적이 남는다.
+- 나오는 빈도: 서기·걷기는 원래 얼굴. 달리기는 눈·입 각각 3~8초마다 기회, 확률(`RUN_EYES` 0.25, `RUN_MOUTH` 0.35)로 0.5~1.3초. 점프는 뛸 때마다 따로(`JUMP_EYES` 0.25, `JUMP_MOUTH` 0.3) 그 점프 동안만.
+- 확인: `--snapshot`이 `app/snap/face_*.png`로 얼굴 확대 컷을 찍는다. `face_grid`는 머리 좌표 1cm·5cm 격자(빨강 x=0, 초록 y=0)와 머리카락 판정(초록)을 보여 줘서 위치를 잴 때 쓴다.
 
 ```bash
 app/build_mac.sh                                    # build/37RHHG.app 생성(임시 서명)
 open build/37RHHG.app                               # 실행
 open build/37RHHG.app --args -- --demo              # 자동으로 걷기·달리기·점프를 반복
 build/37RHHG.app/Contents/MacOS/37RHHG -- --wander --screen 1   # 1번 화면에서 혼자 돌아다니기로 시작, 멀리뛰기 위치가 로그에 찍힘
-cd app && godot --path . --quit-after 600 -- --snapshot   # 자세 8개를 app/snap/에 PNG로
+cd app && godot --path . --quit-after 900 -- --snapshot   # 자세와 얼굴 확대 컷을 app/snap/에 PNG로
 ```
 
+- 집 맥 빌드 환경: `brew install --cask godot`(4.7.2) + 같은 버전 내보내기 템플릿. 설치는 `app/build_mac.sh` 뒤 `/Applications`로 복사
 - 내보내기에는 `textures/vram_compression/import_etc2_astc=true`가 필요하다(없으면 arm64/universal 내보내기 거부).
 - 개발 실행(`godot --path app`)은 Godot 번들로 떠서 Dock에 Godot 아이콘이 보이고, 컴퓨터 사용 도구로 창을 잡을 수 없다. 화면 확인은 내보낸 .app으로 한다.
 - 컴퓨터 사용 도구의 키 입력은 누르고 바로 떼서 걷기 시험이 안 된다. 움직임 확인은 `--demo`로.
@@ -70,7 +83,7 @@ python3 mkgif.py custom 36 # custom.gif 와 custom_sheet.png 생성 (Pillow 필�
 - **뼈대:** 표준 사람형 24개(Hips, Spine02, Spine01, Spine, neck, Head, 좌우 Shoulder/Arm/ForeArm/Hand, 좌우 UpLeg/Leg/Foot/ToeBase). Armature 스케일이 0.01이라 뼈 좌표는 cm 단위.
 - **재질:** Tripo 모델은 PBR 맵 때문에 머리카락이 번들거린다. `_matte()`처럼 metallic 0, roughness 1, 노멀맵 끔으로 덮어쓰면 참조 이미지에 가까워진다.
 - **형태 스무딩은 쓰지 말 것.** 꼭짓점을 움직이면 UV가 밀려 눈·속눈썹 텍스처가 번진다. 법선 재계산(반복 0)만 안전하다.
-- **남은 결함:** 가방이 팔 움직임에 끌려간다. 팔 관절 위치가 좌우로 조금 비대칭이다. 표정은 텍스처라 바뀌지 않는다.
+- **남은 결함:** 가방이 팔 움직임에 끌려간다. 팔 관절 위치가 좌우로 조금 비대칭이다.
 
 ## 힉스필드 크레딧 (참고)
 

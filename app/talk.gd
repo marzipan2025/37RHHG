@@ -31,6 +31,8 @@ var shown := ""                # 지금 말풍선에 있는 글
 var show_left := 0.0
 var nudge_left := 0.0
 var busy := false
+var hold := false              # 마우스가 캐릭터 위에 있거나 캐릭터를 잡고 있다(main 이 알려 준다)
+var text_hover := false        # 마우스가 글씨 위에 있다(도우미가 알려 준다)
 var waiting := false           # 대답을 기다리며 "…" 을 띄운 상태
 var key := ""
 var state := {"memo": "", "turns": [], "day": "", "calls": 0, "nudges": 0, "since_memo": 0}
@@ -125,6 +127,7 @@ func _open(text: String, m: int, seconds := 0.0) -> void:
 
 func _close() -> void:
 	mode = HIDDEN
+	text_hover = false
 	typing = false
 	waiting = false
 	_send({"op": "hide"})
@@ -142,7 +145,11 @@ func _events() -> void:
 	bub_events = []
 	bub_mutex.unlock()
 	for e in evs:
-		if e == "click":
+		if e == "over":
+			text_hover = true
+		elif e == "out":
+			text_hover = false
+		elif e == "click":
 			# 말풍선을 누르면 답장을 쓴다.
 			if mode == SHOW and not waiting:
 				_open(shown, REPLY)
@@ -217,7 +224,8 @@ func step(dt: float) -> void:
 	_events()
 	if mode != HIDDEN:
 		_follow()
-		if mode == SHOW and show_left > 0.0:
+		# 캐릭터나 글씨 위에 마우스가 있거나 캐릭터를 잡고 있는 동안은 사라지는 타이머를 멈춘다.
+		if mode == SHOW and show_left > 0.0 and not hold and not text_hover:
 			show_left -= dt
 			if show_left <= 0.0:
 				_close()

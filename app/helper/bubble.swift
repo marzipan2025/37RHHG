@@ -1,5 +1,5 @@
-// 말 도우미. 캐릭터의 말은 상자 없이 머리 위에 글씨로만 띄우고, 답장 입력칸은 발치에 띄운다.
-// Godot 창 밖에 그려야 하고(창은 캐릭터 크기뿐), 입력칸은 메뉴와 같은 유리 재질
+// 말 도우미. 캐릭터의 말은 머리 위 유리 상자에, 답장 입력칸은 발치에 띄운다.
+// Godot 창 밖에 그려야 하고(창은 캐릭터 크기뿐), 메뉴와 같은 유리 재질
 // (macOS 26+ NSGlassEffectView, 그 전 OS 는 NSVisualEffectView)을 쓰려고 네이티브로 따로 뺐다.
 //
 // 표준 입력(한 줄에 JSON 하나). 좌표는 화면 pt, 왼쪽 위 원점.
@@ -7,13 +7,13 @@
 //   {"op":"input","mode":"reply|key", …}            발치에 입력칸
 //   {"op":"move","x":..,"y":..,"fy":..}
 //   {"op":"hidetext"} {"op":"hideinput"} {"op":"hide"}
-// 표준 출력(한 줄씩): "click"(글씨를 누름) | "esc"(Esc 또는 5초간 입력 없음) | "submit <base64 글>"
+// 표준 출력(한 줄씩): "over"/"out"(마우스가 글씨 위에 들어옴/나감) | "click"(글씨를 누름) | "esc"(Esc 또는 5초간 입력 없음) | "submit <base64 글>"
 // 표준 입력이 닫히면(앱이 끝나면) 같이 끝난다.
 import Cocoa
 
-let textMaxW: CGFloat = 320    // 글 최대 폭
-let fontSize: CGFloat = 18
-let fontName = "BusanDandiScript"   // 부산단디체(손글씨). 없으면 시스템 글꼴.
+let textMaxW: CGFloat = 320    // 글 최대 폭(상자 안쪽)
+let fontSize: CGFloat = 14     // 입력칸과 같은 크기·글꼴, 굵기만 조금 더
+let textPad = NSSize(width: 14, height: 9)   // 상자 안 여백
 let inputW: CGFloat = 240
 let inputIdle: TimeInterval = 5.0   // 입력이 이만큼 없으면 입력칸을 닫는다(답장일 때만)
 
@@ -21,59 +21,57 @@ func emit(_ s: String) {
     FileHandle.standardOutput.write((s + "\n").data(using: .utf8)!)
 }
 
-// 상자가 없어서 어떤 바탕에서도 읽히도록 테두리를 먼저 그리고 그 위에 글씨를 그린다.
+// 유리 상자 안의 말. 글씨 색은 시스템 글자색이라 라이트/다크 모드를 저절로 따른다.
 final class TextView: NSView {
     var text = ""
-    var font = NSFont(name: fontName, size: fontSize) ?? .systemFont(ofSize: fontSize, weight: .medium)
-    static let margin: CGFloat = 6
+    let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
 
-    func attrs(stroke: Bool) -> [NSAttributedString.Key: Any] {
+    func attrs() -> [NSAttributedString.Key: Any] {
         let p = NSMutableParagraphStyle()
-        p.alignment = .center
         p.lineBreakMode = .byWordWrapping
-        // 라이트 모드: 검은 글씨에 흰 테두리. 다크 모드: 흰 글씨에 검은 테두리. 테두리는 반투명.
-        let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        var a: [NSAttributedString.Key: Any] = [.font: font, .paragraphStyle: p,
-                                                .foregroundColor: dark ? NSColor.white : NSColor.black]
-        if stroke {
-            a[.strokeColor] = (dark ? NSColor.black : NSColor.white).withAlphaComponent(0.5)
-            a[.strokeWidth] = 12.0          // 글자 크기의 %, 양수면 테두리만 그린다
-        }
-        return a
+        p.lineSpacing = 2
+        p.lineBreakStrategy = .hangulWordPriority   // 한국어도 낱말 단위로 줄을 바꾼다
+        return [.font: font, .paragraphStyle: p, .foregroundColor: NSColor.labelColor]
     }
 
     // 재는 것과 그리는 것을 같은 레이아웃으로 해서 줄바꿈이 어긋나 글이 잘리는 일이 없게 한다.
-    func layout(stroke: Bool) -> (NSLayoutManager, NSTextContainer) {
-        let storage = NSTextStorage(string: text, attributes: attrs(stroke: stroke))
-        let lm = NSLayoutManager()
-        let tc = NSTextContainer(size: NSSize(width: textMaxW, height: 100000))
+    var storage = NSTextStorage()
+    let lm = NSLayoutManager()
+    let tc = NSTextContainer(size: NSSize(width: textMaxW, height: 100000))
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
         tc.lineFragmentPadding = 0
         lm.addTextContainer(tc)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    // 상자 크기(여백 포함). 짧은 말은 상자도 좁게.
+    func fit() -> NSSize {
+        storage.removeLayoutManager(lm)
+        storage = NSTextStorage(string: text, attributes: attrs())
         storage.addLayoutManager(lm)
         lm.ensureLayout(for: tc)
-        keep.append(storage)
-        return (lm, tc)
-    }
-    var keep: [NSTextStorage] = []
-
-    func fit() -> NSSize {
-        keep.removeAll()
-        let (lm, tc) = layout(stroke: false)
         let r = lm.usedRect(for: tc)
-        // 손글씨 글꼴은 획이 줄 상자 밖으로 삐져나오므로 위아래를 넉넉히 둔다.
-        return NSSize(width: textMaxW + TextView.margin * 2, height: ceil(r.height) + TextView.margin * 2 + fontSize * 0.5)
+        return NSSize(width: ceil(r.width) + textPad.width * 2, height: ceil(r.height) + textPad.height * 2)
     }
 
     override var isFlipped: Bool { true }
 
     override func draw(_ dirtyRect: NSRect) {
-        keep.removeAll()
-        let at = NSPoint(x: TextView.margin, y: TextView.margin + fontSize * 0.25)
-        for stroke in [true, false] {
-            let (lm, tc) = layout(stroke: stroke)
-            lm.drawGlyphs(forGlyphRange: lm.glyphRange(for: tc), at: at)
-        }
+        // 다크/라이트가 바뀌었을 수 있으니 색을 다시 입힌다.
+        storage.addAttributes(attrs(), range: NSRange(location: 0, length: storage.length))
+        lm.drawGlyphs(forGlyphRange: lm.glyphRange(for: tc), at: NSPoint(x: textPad.width, y: textPad.height))
     }
+    // 마우스가 글씨 위에 있는 동안은 앱이 사라지는 타이머를 멈춘다.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+    override func mouseEntered(with event: NSEvent) { emit("over") }
+    override func mouseExited(with event: NSEvent) { emit("out") }
     override func mouseDown(with event: NSEvent) { emit("click") }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
@@ -107,7 +105,7 @@ func makePanel<T: NSPanel>(_ type: T.Type, shadow: Bool) -> T {
 }
 
 final class Talk: NSObject, NSTextFieldDelegate {
-    let textPanel = makePanel(NSPanel.self, shadow: false)
+    let textPanel = makePanel(NSPanel.self, shadow: true)
     let textView = TextView()
     let inputPanel = makePanel(InputPanel.self, shadow: true)
     let inputBox = NSView()
@@ -116,28 +114,32 @@ final class Talk: NSObject, NSTextFieldDelegate {
     var feetY: CGFloat = 0
     var idle: Timer?
     var idleOn = false
+    var prevApp: NSRunningApplication?
 
     override init() {
         super.init()
-        textPanel.contentView = textView
+        textPanel.contentView = glass(textView)
+        inputPanel.contentView = glass(inputBox)
+    }
+
+    func glass(_ content: NSView) -> NSView {
         let radius: CGFloat = 14
         if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView()
-            glass.cornerRadius = radius
-            glass.contentView = inputBox
-            inputPanel.contentView = glass
-        } else {
-            let fx = NSVisualEffectView()
-            fx.material = .menu
-            fx.blendingMode = .behindWindow
-            fx.state = .active
-            fx.wantsLayer = true
-            fx.layer?.cornerRadius = radius
-            fx.layer?.masksToBounds = true
-            inputBox.autoresizingMask = [.width, .height]
-            fx.addSubview(inputBox)
-            inputPanel.contentView = fx
+            let g = NSGlassEffectView()
+            g.cornerRadius = radius
+            g.contentView = content
+            return g
         }
+        let fx = NSVisualEffectView()
+        fx.material = .menu
+        fx.blendingMode = .behindWindow
+        fx.state = .active
+        fx.wantsLayer = true
+        fx.layer?.cornerRadius = radius
+        fx.layer?.masksToBounds = true
+        content.autoresizingMask = [.width, .height]
+        fx.addSubview(content)
+        return fx
     }
 
     // 왼쪽 위 원점 → Cocoa 좌표(아래가 원점)
@@ -154,7 +156,7 @@ final class Talk: NSObject, NSTextFieldDelegate {
         if textPanel.isVisible {
             // 머리 위 가운데. 화면 밖으로 나가면 안쪽으로 민다.
             let s = textPanel.frame.size
-            var o = NSPoint(x: a.x - s.width / 2, y: a.y + 2)
+            var o = NSPoint(x: a.x - s.width / 2, y: a.y + 6)
             o.y = min(o.y, vis.maxY - s.height)
             o.x = max(vis.minX, min(o.x, vis.maxX - s.width))
             textPanel.setFrameOrigin(o)
@@ -178,6 +180,8 @@ final class Talk: NSObject, NSTextFieldDelegate {
         textView.needsDisplay = true
         textPanel.orderFrontRegardless()
         place()
+        // 뜨는 자리에 마우스가 이미 있으면 들어왔다는 알림이 오지 않으므로 직접 알린다.
+        emit(textPanel.frame.contains(NSEvent.mouseLocation) ? "over" : "out")
         // 확인용: BUBBLE_DUMP=경로 를 주면 글씨 그림을 회색 바탕 PNG 로 남긴다.
         if let path = ProcessInfo.processInfo.environment["BUBBLE_DUMP"],
            let rep = textView.bitmapImageRepForCachingDisplay(in: textView.bounds) {
@@ -210,6 +214,11 @@ final class Talk: NSObject, NSTextFieldDelegate {
         inputBox.frame = NSRect(origin: .zero, size: size)
         field.frame = NSRect(x: 12, y: 8, width: size.width - 24, height: 20)
         inputBox.addSubview(field)
+        // 입력칸은 키보드를 가져간다. 닫을 때 원래 쓰던 앱에 돌려주려고 기억해 둔다.
+        if !inputPanel.isVisible {
+            let front = NSWorkspace.shared.frontmostApplication
+            prevApp = front?.processIdentifier == getpid() ? nil : front
+        }
         inputPanel.makeKeyAndOrderFront(nil)
         inputPanel.makeFirstResponder(field)
         place()
@@ -229,7 +238,15 @@ final class Talk: NSObject, NSTextFieldDelegate {
     func hideInput() {
         idle?.invalidate()
         idle = nil
+        let hadKeys = inputPanel.isKeyWindow
         inputPanel.orderOut(nil)
+        field.removeFromSuperview()
+        // 입력칸이 키보드를 쥔 채 사라지면 원래 앱의 창이 키 입력을 못 받는 상태로 남는다.
+        // 원래 앱을 다시 앞으로 불러 키보드를 돌려준다. 사용자가 이미 다른 데를 눌렀으면 건드리지 않는다.
+        if hadKeys, let p = prevApp, !p.isTerminated {
+            p.activate()
+        }
+        prevApp = nil
     }
 
     @objc func submit() {

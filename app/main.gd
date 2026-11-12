@@ -42,6 +42,7 @@ var dragging := false
 var drag_mouse := Vector2.ZERO
 var drag_win := Vector2.ZERO
 var popup_menu := RID()
+var indicator := -1
 var jump_long := false
 var jump_cool := 0.0
 
@@ -147,6 +148,15 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	# 메뉴바 아이콘과 메뉴를 직접 풀어 준다. 그냥 두면 엔진이 꺼진 뒤에 macOS 가 풀다가
+	# 이미 사라진 잠금을 건드려 종료할 때마다 충돌한다("예기치 않게 종료됨" 창).
+	if indicator >= 0:
+		DisplayServer.status_indicator_set_menu(indicator, RID())
+		DisplayServer.delete_status_indicator(indicator)
+		indicator = -1
+	if popup_menu.is_valid():
+		NativeMenu.free_menu(popup_menu)
+		popup_menu = RID()
 	if watch_pid > 0:
 		OS.kill(watch_pid)
 	if watch_thread:
@@ -304,6 +314,7 @@ func _zigzag_step(dt: float) -> void:
 	var body := Rect2(feet.x - 44.0 * px_scale, feet.y - lift - CHAR_H * px_scale, 88.0 * px_scale, (CHAR_H + 6.0) * px_scale)
 	var dx := (m.x - zig_x) / px_scale
 	zig_x = m.x
+	talk.hold = dragging or body.has_point(m)
 	var inside := body.has_point(m) and not dragging and Input.get_mouse_button_mask() == 0
 	if not inside or (zig_turns > 0 and zig_t > ZIG_TIME):
 		zig_turns = 0
@@ -444,6 +455,7 @@ func _setup_menu() -> void:
 	NativeMenu.add_separator(menu)
 	NativeMenu.add_item(menu, "종료", func(_tag): get_tree().quit())
 	var ind := DisplayServer.create_status_indicator(_menu_icon(), "37RHHG", func(_b, _p): pass)
+	indicator = ind
 	DisplayServer.status_indicator_set_menu(ind, menu)
 	print("status indicator ", ind, " feature ", DisplayServer.has_feature(DisplayServer.FEATURE_STATUS_INDICATOR))
 

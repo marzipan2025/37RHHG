@@ -560,9 +560,10 @@ func _face_step(dt: float, act: int, idle: bool) -> void:
 	eyes_left -= dt
 	mouth_left -= dt
 	# 서 있을 때는 3.5~8초마다 감은 눈으로 0.06~0.09초 짧게 깜빡인다. 가끔 두 번 연달아.
+	# 걸을 때는 3배 드물게(10.5~24초). 달리기·점프 중에는 깜빡이지 않는다.
 	blink_left -= dt
-	if idle:
-		blink_next -= dt
+	if act == 0:
+		blink_next -= dt / (1.0 if idle else 3.0)
 		if blink_next <= 0.0:
 			blink_left = randf_range(0.06, 0.09)
 			blink_next = blink_left + (0.14 if randf() < 0.1 else randf_range(3.5, 8.0))

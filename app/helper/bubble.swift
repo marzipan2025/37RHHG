@@ -12,7 +12,7 @@
 import Cocoa
 
 let textMaxW: CGFloat = 320    // 글 최대 폭
-let fontSize: CGFloat = 22
+let fontSize: CGFloat = 18
 let fontName = "BusanDandiScript"   // 부산단디체(손글씨). 없으면 시스템 글꼴.
 let inputW: CGFloat = 240
 let inputIdle: TimeInterval = 5.0   // 입력이 이만큼 없으면 입력칸을 닫는다(답장일 때만)
@@ -42,17 +42,37 @@ final class TextView: NSView {
         return a
     }
 
+    // 재는 것과 그리는 것을 같은 레이아웃으로 해서 줄바꿈이 어긋나 글이 잘리는 일이 없게 한다.
+    func layout(stroke: Bool) -> (NSLayoutManager, NSTextContainer) {
+        let storage = NSTextStorage(string: text, attributes: attrs(stroke: stroke))
+        let lm = NSLayoutManager()
+        let tc = NSTextContainer(size: NSSize(width: textMaxW, height: 100000))
+        tc.lineFragmentPadding = 0
+        lm.addTextContainer(tc)
+        storage.addLayoutManager(lm)
+        lm.ensureLayout(for: tc)
+        keep.append(storage)
+        return (lm, tc)
+    }
+    var keep: [NSTextStorage] = []
+
     func fit() -> NSSize {
-        let r = (text as NSString).boundingRect(with: NSSize(width: textMaxW, height: 4000),
-                                                options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attrs(stroke: false))
-        return NSSize(width: ceil(r.width) + TextView.margin * 2, height: ceil(r.height) + TextView.margin * 2)
+        keep.removeAll()
+        let (lm, tc) = layout(stroke: false)
+        let r = lm.usedRect(for: tc)
+        // 손글씨 글꼴은 획이 줄 상자 밖으로 삐져나오므로 위아래를 넉넉히 둔다.
+        return NSSize(width: textMaxW + TextView.margin * 2, height: ceil(r.height) + TextView.margin * 2 + fontSize * 0.5)
     }
 
+    override var isFlipped: Bool { true }
+
     override func draw(_ dirtyRect: NSRect) {
-        let r = bounds.insetBy(dx: TextView.margin, dy: TextView.margin)
-        let s = text as NSString
-        s.draw(with: r, options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attrs(stroke: true))
-        s.draw(with: r, options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attrs(stroke: false))
+        keep.removeAll()
+        let at = NSPoint(x: TextView.margin, y: TextView.margin + fontSize * 0.25)
+        for stroke in [true, false] {
+            let (lm, tc) = layout(stroke: stroke)
+            lm.drawGlyphs(forGlyphRange: lm.glyphRange(for: tc), at: at)
+        }
     }
     override func mouseDown(with event: NSEvent) { emit("click") }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -164,7 +184,7 @@ final class Talk: NSObject, NSTextFieldDelegate {
             textView.cacheDisplay(in: textView.bounds, to: rep)
             let img = NSImage(size: textView.bounds.size)
             img.lockFocus()
-            NSColor(white: 0.45, alpha: 1).setFill()
+            NSColor(white: 0.55, alpha: 1).setFill()
             NSRect(origin: .zero, size: textView.bounds.size).fill()
             rep.draw(in: textView.bounds)
             img.unlockFocus()

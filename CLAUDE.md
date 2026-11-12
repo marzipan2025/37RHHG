@@ -19,11 +19,16 @@
 - Dock 아이콘 숨김: `export_presets.cfg`의 `application/additional_plist_content`로 `LSUIElement` 넣음.
 - 동작은 전부 `main.gd`의 `_pose(w, run, ph, t, j)` 하나로 만든다. 대기↔걷기↔달리기는 수치를 섞어서 끊김 없이 넘어가고, 걸음 주기는 실제 이동 속도로 정해서 발이 미끄러지지 않는다.
 - 옆으로 걸을 때 완전한 옆모습이면 오른쪽 머리카락이 얼굴을 가려서 70도 정도만 돌린다.
+- 혼자 돌아다니기(메뉴 맨 위 체크 항목): 걷기 2~6초(25%는 달리기)와 쉬기 1.5~5초를 랜덤하게 반복한다. 쉴 때 반쯤은 이쪽을 본다. 화면 가장자리에 막히면 방향을 바꾸고, 키를 누르면 그동안은 키 조작이 우선이다.
+- 창 경계 멀리뛰기: `helper/winwatch`(Swift)가 0.25초마다 다른 앱 창 위치를 `CGWindowListCopyWindowInfo`로 읽어 한 줄로 보내고, 앱이 `OS.execute_with_pipe`로 받아 스레드에서 읽는다. 발 위치와 앞쪽 지점이 어떤 창 안팎으로 갈리면 그 방향으로 0.85초 동안 높이 58pt로 멀리뛴다(뛴 뒤 1초는 다시 안 뜀). 혼자 돌아다니기 중에만 동작한다.
+- 좌표: CG 창 좌표는 주 화면 왼쪽 위가 원점인 pt. Godot 화면 좌표는 모든 화면을 합친 영역의 왼쪽 위가 원점인 px. 그래서 도우미가 합친 영역의 원점을 같이 보내고 `(cg - origin) * px_scale`로 바꾼다. 창 위치 읽기에는 화면 기록 권한이 필요 없다(창 이름만 필요).
+- 캐릭터는 지금 있는 화면 안에서만 돌아다닌다. 다른 모니터로 보내려면 끌어서 옮긴다.
 
 ```bash
 app/build_mac.sh                                    # build/37RHHG.app 생성(임시 서명)
 open build/37RHHG.app                               # 실행
 open build/37RHHG.app --args -- --demo              # 자동으로 걷기·달리기·점프를 반복
+build/37RHHG.app/Contents/MacOS/37RHHG -- --wander --screen 1   # 1번 화면에서 혼자 돌아다니기로 시작, 멀리뛰기 위치가 로그에 찍힘
 cd app && godot --path . --quit-after 600 -- --snapshot   # 자세 8개를 app/snap/에 PNG로
 ```
 

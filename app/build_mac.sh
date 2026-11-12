@@ -6,9 +6,12 @@ cd "$(dirname "$0")"
 OUT=../build/37RHHG.app
 rm -rf "$OUT"
 mkdir -p ../build
+helper/build_helper.sh
 godot --headless --path . --import >/dev/null 2>&1 || true
 godot --headless --path . --export-release "macOS" "$OUT" 2>&1 | grep -E "ERROR" && exit 1 || true
 [ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$OUT/Contents/Info.plist")" = "true" ] || { echo "LSUIElement 누락"; exit 1; }
+# 다른 앱 창 위치를 알려주는 도우미를 실행 파일 옆에 둔다.
+cp helper/winwatch "$OUT/Contents/MacOS/winwatch"
 codesign --force --deep -s - "$OUT"
 codesign -v "$OUT"
 echo "완료: $OUT"

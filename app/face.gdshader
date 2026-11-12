@@ -3,7 +3,8 @@
 // 앞에서 비추듯 피부색으로 원래 그림을 덮고 그 위에 새 모양을 그린다.
 // 좌표: x = 캐릭터의 왼쪽, y = 위, z = 앞. 원점은 머리 뼈.
 shader_type spatial;
-render_mode diffuse_burley, specular_schlick_ggx;
+// 양면을 그린다: 팔을 들면 팔과 몸이 맞닿아 있던 자리에 구멍이 생기는데, 안쪽 면이 보여 덜 티 난다.
+render_mode diffuse_burley, specular_schlick_ggx, cull_disabled;
 
 uniform sampler2D albedo_tex : source_color, filter_linear_mipmap, repeat_enable;
 uniform vec4 albedo_col : source_color = vec4(1.0);

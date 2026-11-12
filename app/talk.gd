@@ -200,8 +200,12 @@ func poke() -> void:
 	_nudge(true)
 
 
+signal spoke                   # 캐릭터가 말을 띄웠다(main 이 인사 동작에 쓴다)
+
+
 func say(text: String, seconds := 0.0) -> void:
 	waiting = false
+	spoke.emit()
 	_open(text, SHOW, seconds if seconds > 0.0 else SHOW_TIME)
 
 

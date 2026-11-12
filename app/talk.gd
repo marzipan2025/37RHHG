@@ -1,6 +1,6 @@
 extends Node
 ## 캐릭터가 가끔 말을 걸고, 말풍선을 누르면 답장할 수 있다(Gemini API 무료 등급).
-## 지난 대화는 이 앱이 직접 쌓는다: 최근 몇 마디 + 짧은 요약 메모(user://talk.json).
+## 지난 대화는 이 앱이 직접 쌓는다: 최근 몇 마디 + 기억 메모(사람/요즘/이어갈 것, user://talk.json).
 ## 토큰을 아끼려고 한 번 부를 때 메모와 최근 몇 마디만 보내고, 하루 호출 횟수에 상한을 둔다.
 ## API 키는 저장소에 넣지 않는다. 메뉴의 "Gemini 키 넣기…"로 넣으면 user://gemini_key.txt 에 둔다.
 
@@ -10,10 +10,10 @@ const DAY_CALLS := 24          # 하루 API 호출 상한(먼저 말 걸기 + �
 const DAY_NUDGES := 6          # 하루에 먼저 말 거는 횟수
 const NUDGE_MIN := 25.0 * 60.0 # 먼저 말 거는 간격(초)
 const NUDGE_MAX := 60.0 * 60.0
-const KEEP_TURNS := 6          # API 에 같이 보내는 최근 말 수
-const MEMO_EVERY := 6          # 사용자가 이만큼 답하면 요약 메모를 새로 쓴다
-const MEMO_CHARS := 400
-const OUT_TOKENS := 256
+const KEEP_TURNS := 12         # API 에 같이 보내는 최근 말 수
+const MEMO_EVERY := 4          # 사용자가 이만큼 답하면 기억 메모를 새로 쓴다
+const MEMO_CHARS := 800
+const OUT_TOKENS := 320
 
 const SHOW_TIME := 5.0         # 말이 떠 있는 시간(초). 이 안에 글씨를 누르면 답장할 수 있다.
 
@@ -246,22 +246,41 @@ func _save() -> void:
 func _system() -> String:
 	var now := Time.get_datetime_dict_from_system()
 	var days := ["일", "월", "화", "수", "목", "금", "토"]
-	return ("너는 사용자의 맥 화면 위를 걸어 다니는 작은 캐릭터다. 친한 친구처럼 한국어 반말로 짧게 말한다. "
-		+ "한두 문장, 80자 이내. 이모지와 마크다운은 쓰지 않는다.\n"
-		+ "사용자에 대해 기억하는 것:\n%s\n지금: %d월 %d일 %s요일 %d시") % [
-		state.memo if not String(state.memo).is_empty() else "(아직 없음)",
+	return ("너는 사용자의 맥 화면 위를 걸어 다니는 작은 캐릭터이고, 사용자를 오래 지켜본 친한 친구다. 한국어 반말로 말한다.\n"
+		+ "- 아래 '기억'과 '최근 대화'를 실제로 써라. 사용자가 전에 한 말, 하던 일, 좋아하는 것을 구체적으로 짚어서 이어 간다.\n"
+		+ "- 뻔한 안부(날씨, 밥, 피곤하지)는 피한다. 사용자의 일과 생각에 진짜로 궁금해하고, 한 번에 질문은 하나만 한다.\n"
+		+ "- 사용자가 생각이나 고민을 말하면 맞장구만 치지 말고 네 의견이나 다른 시각을 짧게 보탠다.\n"
+		+ "- 너는 화면 밖 세상을 볼 수 없다. 날씨·뉴스·시세처럼 모르는 사실은 지어내지 말고 모른다고 한다.\n"
+		+ "- 먼저 말을 걸 때는 한두 문장 70자 이내. 질문에 답할 때는 필요하면 세 문장 140자까지. 이모지와 마크다운은 쓰지 않는다.\n"
+		+ "기억:\n%s\n지금: %d월 %d일 %s요일 %d시") % [
+		state.memo if not String(state.memo).is_empty() else "(아직 없음. 사용자가 어떤 사람인지, 요즘 무엇을 하는지부터 알아 가라.)",
 		now.month, now.day, days[now.weekday], now.hour]
+
+
+# 그 말을 한 지 얼마나 됐는지. 며칠 만에 이어지는 대화인지 알 수 있게 한다.
+func _ago(ts: float) -> String:
+	if ts <= 0.0:
+		return ""
+	var sec := Time.get_unix_time_from_system() - ts
+	if sec < 3600.0:
+		return ""
+	if sec < 86400.0:
+		return "[%d시간 전] " % int(sec / 3600.0)
+	return "[%d일 전] " % int(sec / 86400.0)
 
 
 func _recent() -> String:
 	var out := ""
 	for t in state.turns:
-		out += ("사용자: " if t.r == "u" else "너: ") + String(t.t) + "\n"
+		out += _ago(float(t.get("ts", 0.0))) + ("사용자: " if t.r == "u" else "너: ") + String(t.t) + "\n"
 	return out
 
 
 func _push(r: String, t: String) -> void:
-	state.turns.append({"r": r, "t": t})
+	# 답을 못 받은 채 먼저 건 말이 연달아 쌓이면 진짜 대화가 밀려난다. 직전 것을 바꿔 넣는다.
+	if r == "m" and state.turns.size() > 0 and state.turns[-1].r == "m" and bool(state.turns[-1].get("n", false)):
+		state.turns.pop_back()
+	state.turns.append({"r": r, "t": t, "ts": Time.get_unix_time_from_system()})
 	while state.turns.size() > KEEP_TURNS:
 		state.turns.pop_front()
 
@@ -309,8 +328,9 @@ func _nudge(poked: bool) -> void:
 		return
 	if not poked and int(state.nudges) >= DAY_NUDGES:
 		return
-	var prompt := "최근 대화:\n%s\n(사용자는 지금 아무 말도 하지 않았다. 기억과 최근 대화에 어울리는 주제로 네가 먼저 한마디 걸어라. " % _recent()
-	prompt += "기억이 없으면 가볍게 안부나 취향을 물어라. 방금 한 말을 되풀이하지 마라.)"
+	var prompt := "최근 대화:\n%s\n(사용자는 지금 아무 말도 하지 않았다. 네가 먼저 한마디 걸어라. " % _recent()
+	prompt += "기억의 '이어갈 것'이나 최근 대화에서 하나를 골라 그 뒤가 어떻게 됐는지 묻거나, 사용자의 관심사에 대해 네 생각을 한마디 던져라. "
+	prompt += "기억이 없으면 사용자가 요즘 무엇에 빠져 있는지 물어라. 네가 최근에 한 말이나 질문을 되풀이하지 마라.)"
 	var done := func(text: String, _code: int):
 		if text.is_empty():
 			if waiting:
@@ -319,6 +339,7 @@ func _nudge(poked: bool) -> void:
 		if mode != HIDDEN and not waiting:
 			return
 		_push("m", text)
+		state.turns[-1]["n"] = true      # 먼저 건 말(아직 답을 못 받음)
 		_save()
 		say(text)
 	if _call(_system(), prompt, OUT_TOKENS, done):
@@ -330,7 +351,7 @@ func _nudge(poked: bool) -> void:
 
 
 func _reply(text: String) -> void:
-	var prompt := "최근 대화:\n%s사용자: %s\n(사용자의 말에 대답해라.)" % [_recent(), text]
+	var prompt := "최근 대화:\n%s사용자: %s\n(사용자의 말에 대답해라. 대화가 이어지도록, 어울리면 끝에 질문 하나를 붙여라.)" % [_recent(), text]
 	_today()
 	if int(state.calls) >= DAY_CALLS:
 		say("오늘은 말을 너무 많이 했어. 내일 또 얘기하자.")
@@ -341,6 +362,8 @@ func _reply(text: String) -> void:
 		if answer.is_empty():
 			say("지금은 대답을 못 하겠어. (%d)" % code)
 			return
+		if state.turns.size() > 0:
+			state.turns[-1].erase("n")   # 사용자가 답했으니 직전 말은 대화로 남긴다
 		_push("u", text)
 		_push("m", answer)
 		state.since_memo = int(state.since_memo) + 1
@@ -353,14 +376,19 @@ func _reply(text: String) -> void:
 
 
 func _memo() -> void:
-	# 가끔 한 번, 기억과 최근 대화를 짧은 메모로 다시 쓴다. 이 메모가 '그간의 대화'를 대신한다.
+	# 가끔 한 번, 기억과 최근 대화를 메모로 다시 쓴다. 이 메모가 '그간의 대화'를 대신한다.
+	# 오래 남길 것(사람)과 다음에 이어갈 것(진행 중인 일)을 나눠 적어야 대화가 이어진다.
 	var prompt := ("지금까지의 기억:\n%s\n\n최근 대화:\n%s\n"
-		+ "위 둘을 합쳐, 사용자에 대해 기억해 둘 사실·관심사·진행 중인 일을 한국어 %d자 이내의 짧은 항목들로 다시 써라. 메모만 출력해라.") % [
-		state.memo, _recent(), MEMO_CHARS]
+		+ "위 둘을 합쳐 기억 메모를 다시 써라. 한국어, 전체 %d자 이내, 아래 세 묶음으로. 메모만 출력해라.\n"
+		+ "[사람] 사용자가 어떤 사람인지: 하는 일, 취향, 가치관, 말버릇. 오래 유지할 사실.\n"
+		+ "[요즘] 요즘 하고 있는 일과 관심사, 고민. 구체적인 이름과 숫자를 살려라.\n"
+		+ "[이어갈 것] 끝나지 않은 이야기, 결과가 궁금한 일, 다음에 물어볼 것 세 개 이내.\n"
+		+ "기존 기억은 새 대화와 어긋나지 않는 한 지우지 말고, 자리가 모자라면 덜 중요한 것부터 줄여라. 대화에 없는 것은 지어내지 마라.") % [
+		state.memo if not String(state.memo).is_empty() else "(없음)", _recent(), MEMO_CHARS]
 	var done := func(text: String, _code: int):
 		if text.is_empty():
 			return
-		state.memo = text.left(MEMO_CHARS + 100)
+		state.memo = text.left(MEMO_CHARS + 200)
 		state.since_memo = 0
 		_save()
-	_call("너는 대화를 간결하게 요약하는 도우미다.", prompt, 500, done)
+	_call("너는 대화에서 사람에 대한 기억을 정리하는 도우미다.", prompt, 1100, done)

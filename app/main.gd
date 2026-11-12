@@ -86,6 +86,8 @@ var eyes_left := 0.0           # 감은 눈이 남은 시간
 var mouth_left := 0.0          # 벌린 입이 남은 시간
 var eyes_next := 3.0           # 달리는 중 다음 감은 눈 기회까지
 var mouth_next := 3.0
+var blink_next := 2.0          # 서 있을 때 다음 깜빡임까지
+var blink_left := 0.0          # 깜빡이며 감고 있는 남은 시간
 
 
 func _ready() -> void:
@@ -539,13 +541,13 @@ func _process(dt: float) -> void:
 		look_timer = randf_range(1.2, 3.5)
 		look_target = 0.0 if randf() < 0.35 else randf_range(-LOOK_MAX, LOOK_MAX)
 	look = lerpf(look, look_target * (1.0 - w), 1.0 - exp(-4.0 * dt))
-	_face_step(dt, 2 if jump_u >= 0.0 else (1 if run > 0.5 else 0))
+	_face_step(dt, 2 if jump_u >= 0.0 else (1 if run > 0.5 else 0), w < 0.15)
 	_pose(w, run, phase, clock, j, leap)
 
 
 # ---------------------------------------------------------------- 표정
 
-# 감은 눈과 벌린 입은 따로 정한다.
+# 감은 눈과 벌린 입은 따로 정한다. 서 있을 때는 감은 눈으로 자주 깜빡인다.
 # 달리는 동안: 각자 3~8초마다 한 번씩 기회가 오고, 그때 확률로 0.5~1.3초 동안만 나온다.
 # 점프: 뛸 때마다 따로 확률을 굴려 그 점프 동안만 나온다.
 const RUN_EYES := 0.25
@@ -554,9 +556,19 @@ const JUMP_EYES := 0.25
 const JUMP_MOUTH := 0.3
 
 
-func _face_step(dt: float, act: int) -> void:
+func _face_step(dt: float, act: int, idle: bool) -> void:
 	eyes_left -= dt
 	mouth_left -= dt
+	# 서 있을 때는 3.5~8초마다 감은 눈으로 0.06~0.09초 짧게 깜빡인다. 가끔 두 번 연달아.
+	blink_left -= dt
+	if idle:
+		blink_next -= dt
+		if blink_next <= 0.0:
+			blink_left = randf_range(0.06, 0.09)
+			blink_next = blink_left + (0.14 if randf() < 0.1 else randf_range(3.5, 8.0))
+	else:
+		blink_left = 0.0
+		blink_next = randf_range(0.8, 2.0)
 	if act != face_act:
 		if face_act == 2:
 			# 점프 표정은 착지하면 끝낸다.
@@ -583,7 +595,7 @@ func _face_step(dt: float, act: int) -> void:
 			mouth_next = randf_range(3.0, 8.0)
 			if randf() < RUN_MOUTH:
 				mouth_left = randf_range(0.5, 1.3)
-	_face_set(0.0, 1.0 if eyes_left > 0.0 else 0.0, 0.6 if mouth_left > 0.0 else 0.0)
+	_face_set(0.0, 1.0 if (eyes_left > 0.0 or blink_left > 0.0) else 0.0, 0.6 if mouth_left > 0.0 else 0.0)
 
 
 func _face_set(bl: float, hap: float, mo: float) -> void:

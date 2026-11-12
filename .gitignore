@@ -1,0 +1,6 @@
+.DS_Store
+.godot/
+*.import
+preview/gif/*.png
+venv/
+__pycache__/

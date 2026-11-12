@@ -102,6 +102,7 @@ var cam_base := Vector3.ZERO
 var cam_lift_dir := Vector3.UP
 
 var snapshot := false
+var talk: Node                 # 말 걸기(talk.gd)
 var cam: Camera3D
 
 # 얼굴 덧그리기(face.gdshader). 서기·걷기는 원래 얼굴.
@@ -124,6 +125,8 @@ func _ready() -> void:
 		_take_snapshots()
 		return
 	_setup_window()
+	talk = load("res://talk.gd").new()
+	add_child(talk)
 	_setup_menu()
 	_start_watch()
 	var args := OS.get_cmdline_user_args()
@@ -134,6 +137,13 @@ func _ready() -> void:
 		_reset_position()
 	if "--wander" in args:
 		_toggle_wander()
+	var yi := args.find("--say")
+	if yi >= 0 and yi + 1 < args.size():
+		# 확인용: 말풍선을 띄운다. "--say-reply" 면 답장 칸까지.
+		await get_tree().create_timer(1.0).timeout
+		talk.say(args[yi + 1], 600.0)
+		if "--say-reply" in args:
+			talk._open(args[yi + 1], talk.REPLY)
 
 
 func _exit_tree() -> void:
@@ -274,6 +284,53 @@ func _light_set(v: Vector2, blend: float) -> void:
 	shadow.position.z = off.y
 
 
+# 캐릭터 위에서 마우스를 좌우로 두세 번 흔들면 말을 건다.
+const ZIG_STROKE := 14.0       # 한 번 흔든 것으로 치는 최소 좌우 이동(pt)
+const ZIG_TURNS := 3           # 방향을 이만큼 바꾸면 발동
+const ZIG_TIME := 1.2          # 이 시간 안에 해야 한다
+var zig_x := 0.0
+var zig_dir := 0
+var zig_run := 0.0             # 지금 방향으로 간 거리(pt)
+var zig_turns := 0
+var zig_t := 0.0
+var zig_cool := 0.0
+
+
+func _zigzag_step(dt: float) -> void:
+	zig_cool -= dt
+	zig_t += dt
+	var m := Vector2(DisplayServer.mouse_get_position())
+	var feet := _feet()
+	var body := Rect2(feet.x - 44.0 * px_scale, feet.y - lift - CHAR_H * px_scale, 88.0 * px_scale, (CHAR_H + 6.0) * px_scale)
+	var dx := (m.x - zig_x) / px_scale
+	zig_x = m.x
+	var inside := body.has_point(m) and not dragging and Input.get_mouse_button_mask() == 0
+	if not inside or (zig_turns > 0 and zig_t > ZIG_TIME):
+		zig_turns = 0
+		zig_run = 0.0
+		zig_dir = 0
+		if not inside:
+			return
+	if absf(dx) < 0.01:
+		return
+	var d := 1 if dx > 0.0 else -1
+	if d == zig_dir or zig_dir == 0:
+		zig_dir = d
+		zig_run += absf(dx)
+		return
+	# 방향이 바뀌었다. 직전에 충분히 갔으면 한 번 흔든 것으로 센다.
+	if zig_run >= ZIG_STROKE:
+		if zig_turns == 0:
+			zig_t = 0.0
+		zig_turns += 1
+	zig_dir = d
+	zig_run = absf(dx)
+	if zig_turns >= ZIG_TURNS and zig_cool <= 0.0:
+		zig_turns = 0
+		zig_cool = 4.0
+		talk.poke()
+
+
 func _light_step(dt: float) -> void:
 	var chest := _feet() - Vector2(0, lift + CHAR_H * 0.55 * px_scale)
 	_light_set((Vector2(DisplayServer.mouse_get_position()) - chest) / px_scale, 1.0 - exp(-8.0 * dt))
@@ -381,6 +438,9 @@ func _setup_menu() -> void:
 	NativeMenu.add_separator(menu)
 	NativeMenu.add_item(menu, "키보드로 조작하기", func(_tag): _focus())
 	NativeMenu.add_item(menu, "화면 아래 가운데로", func(_tag): _reset_position())
+	NativeMenu.add_separator(menu)
+	NativeMenu.add_item(menu, "말 걸기", func(_tag): talk.talk_now())
+	NativeMenu.add_item(menu, "Gemini 키 넣기…", func(_tag): talk.ask_key())
 	NativeMenu.add_separator(menu)
 	NativeMenu.add_item(menu, "종료", func(_tag): get_tree().quit())
 	var ind := DisplayServer.create_status_indicator(_menu_icon(), "37RHHG", func(_b, _p): pass)
@@ -499,6 +559,8 @@ func _input(event: InputEvent) -> void:
 
 
 func _key(a: Key, b: Key) -> float:
+	if talk.typing:
+		return 0.0
 	return 1.0 if Input.is_physical_key_pressed(a) or Input.is_physical_key_pressed(b) or a in demo_keys else 0.0
 
 
@@ -534,12 +596,12 @@ func _process(dt: float) -> void:
 		dragging = false
 	if demo:
 		_demo_step()
-	_set_zoom(BASE_ZOOM * (2.0 if Input.is_physical_key_pressed(KEY_Z) else 1.0))
+	_set_zoom(BASE_ZOOM * (2.0 if Input.is_physical_key_pressed(KEY_Z) and not talk.typing else 1.0))
 	_update_rects()
 	var leaping := jump_u >= 0.0 and jump_long
 	var d := Vector2(_key(KEY_RIGHT, KEY_D) - _key(KEY_LEFT, KEY_A),
 		_key(KEY_DOWN, KEY_S) - _key(KEY_UP, KEY_W))
-	var shift := Input.is_physical_key_pressed(KEY_SHIFT) or KEY_SHIFT in demo_keys
+	var shift: bool = (Input.is_physical_key_pressed(KEY_SHIFT) and not talk.typing) or KEY_SHIFT in demo_keys
 	if d == Vector2.ZERO and wander and not dragging:
 		_wander_step(dt)
 		if w_walking:
@@ -623,6 +685,11 @@ func _process(dt: float) -> void:
 	look = lerpf(look, look_target * (1.0 - w), 1.0 - exp(-4.0 * dt))
 	if MOUSE_LIGHT:
 		_light_step(dt)
+	# 말풍선 도우미는 화면 pt(왼쪽 위 원점)로 받는다.
+	talk.anchor = (_feet() - Vector2(0, lift + (CHAR_H + 4.0) * px_scale)) / screen_scale + origin
+	talk.feet_y = _feet().y / screen_scale + origin.y
+	_zigzag_step(dt)
+	talk.step(dt)
 	_face_step(dt, 2 if jump_u >= 0.0 else (1 if run > 0.5 else 0), w < 0.15)
 	_pose(w, run, phase, clock, j, leap)
 

@@ -25,6 +25,7 @@ uniform vec3 tongue : source_color = vec3(0.98, 0.56, 0.56);
 uniform vec2 eye_c = vec2(14.5, 13.4);      // 왼쪽 눈 중심(오른쪽 눈은 x 반대)
 uniform vec2 eye_s = vec2(6.8, 7.2);       // 눈 반지름
 uniform vec2 mouth_c = vec2(0.0, 3.9);
+uniform float mouth_dark = 0.6;           // 평소 입을 진하게 하는 정도
 uniform vec2 mouth_s = vec2(3.6, 4.2);     // 다 벌렸을 때 반지름
 uniform float line_w = 1.3;                // 선 두께(cm)
 uniform vec3 head_c = vec3(0.0, 14.0, -12.0);   // 얼굴을 공으로 볼 때 중심(cm)
@@ -157,6 +158,10 @@ void fragment() {
 				vec3 nv = normalize((VIEW_MATRIX * vec4(nw, 0.0)).xyz);
 				NORMAL = normalize(mix(NORMAL, nv, smooth_n));
 			}
+			// 평소 입: 원래 그림이 흐릿해서 선만 조금 더 진하게 한다(피부보다 어두운 곳만).
+			float mzone = cover((length((p - mouth_c) / vec2(mouth_s.x * 1.05, 1.4)) - 1.0) * 1.2);
+			float dl = dot(skin - c, vec3(0.3, 0.5, 0.2));
+			c = mix(c, ink, mzone * smoothstep(0.02, 0.2, dl) * mouth_dark * (1.0 - min(mouth * 4.0, 1.0)));
 			if (mouth > 0.01) {
 				// 원래 작은 입을 덮고, 위는 살짝 둥글고 아래는 큰 반원인 벌린 입을 그린다.
 				vec2 ms = mouth_s * vec2(mix(0.7, 1.0, mouth), mouth);

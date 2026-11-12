@@ -25,7 +25,10 @@ const LEAP_SPEED := 170.0
 # 클릭을 받는 영역(창 안 pt). 나머지 투명한 곳은 클릭이 아래로 통과한다.
 const HIT_RECT := Rect2(46, 20, 88, 178)
 
-var px_scale := 1.0
+var px_scale := 1.0            # 창 크기용 배율 = screen_scale * zoom
+var screen_scale := 1.0        # 화면 자체 배율(pt → 화면 픽셀)
+const BASE_ZOOM := 160.0 / CHAR_H   # 기본 캐릭터 키 160pt
+var zoom := BASE_ZOOM           # 점검용: z 를 누르고 있는 동안만 2배. 나중에 지울 것.
 var win_pos := Vector2.ZERO    # 창 왼쪽 위, 화면 픽셀
 var move_dir := Vector2.DOWN
 var speed := 0.0               # 입력이 원하는 속도
@@ -68,12 +71,35 @@ var origin := Vector2.ZERO     # 모든 화면을 합친 영역의 왼쪽 위(pt
 
 var model: Node3D
 var shadow: MeshInstance3D
+
+# 마우스를 광원으로: 빛이 마우스 쪽에서 오고, 가까울수록 음영이 짙다. 형태보다 분위기만.
+# 끄려면 MOUSE_LIGHT 를 false 로(예전 고정 조명으로 돌아간다).
+const MOUSE_LIGHT := true
+const LIGHT_DEPTH := 140.0     # 빛이 화면 앞으로 떠 있는 거리(pt). 클수록 정면광에 가깝다.
+const LIGHT_NEAR := 120.0      # 이보다 가까우면 가장 짙게(pt)
+const LIGHT_FAR := 900.0       # 이보다 멀면 가장 옅게
+# 밝은 쪽 밝기(주변광 + 방향광)는 늘 LIGHT_PEAK 로 같다. 가까울수록 그늘 쪽만 조금 내려간다.
+const LIGHT_PEAK := 1.15
+const SUN_FAR := 0.06          # 방향광 세기(멀 때 / 가까울 때). 멀면 음영이 거의 없다.
+const SUN_NEAR := 0.30
+const AMB_TINT := Color(1.0, 0.90, 0.93)   # 그늘이 회색으로 죽지 않게 주변광에 섞는 분홍(가까울 때)
+const SUN_TINT := Color(1.0, 0.97, 0.96)
+const SHADOW_COL := Color(0.36, 0.12, 0.19, 0.30)   # 발밑 그림자(어두운 장밋빛)
+const SHADOW_SHIFT := 0.16     # 발밑 그림자가 빛 반대쪽으로 밀리는 양(월드 단위)
+var sun: DirectionalLight3D
+var env: Environment
+var light_dir := Vector3(0.3, 0.6, 0.74)   # 카메라 기준, 빛이 있는 쪽
+var light_near := 0.0
 var skel: Skeleton3D
 var bones := {}
 var lat := Vector3.RIGHT       # 캐릭터의 왼쪽 방향(골격 공간)
 var fwd := Vector3.BACK        # 캐릭터의 앞 방향
 var unit := 1.0                # 골격 공간의 1cm
 var k := MODEL_H / CHAR_H      # pt → 월드 단위
+# macOS 는 창을 메뉴바 위로 못 올린다. 그래서 화면 위쪽에서는 창을 멈추고 캐릭터를 창 안에서 올려 그린다.
+var lift := 0.0                # 창 안에서 캐릭터를 올려 그리는 양(화면 픽셀)
+var cam_base := Vector3.ZERO
+var cam_lift_dir := Vector3.UP
 
 var snapshot := false
 var cam: Camera3D
@@ -162,14 +188,14 @@ func _update_rects() -> void:
 	for s in parts[1].split(";", false):
 		var v := s.split(",")
 		if v.size() == 4:
-			var p := (Vector2(float(v[0]), float(v[1])) - origin) * px_scale
-			rects.append(Rect2(p, Vector2(float(v[2]), float(v[3])) * px_scale))
+			var p := (Vector2(float(v[0]), float(v[1])) - origin) * screen_scale
+			rects.append(Rect2(p, Vector2(float(v[2]), float(v[3])) * screen_scale))
 
 
 # ---------------------------------------------------------------- 장면
 
 func _build_scene() -> void:
-	var env := Environment.new()
+	env = Environment.new()
 	env.background_mode = Environment.BG_CLEAR_COLOR
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	env.ambient_light_color = Color.WHITE
@@ -178,7 +204,7 @@ func _build_scene() -> void:
 	we.environment = env
 	add_child(we)
 
-	var sun := DirectionalLight3D.new()
+	sun = DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-40, 25, 0)
 	sun.light_energy = 0.45
 	add_child(sun)
@@ -201,8 +227,8 @@ func _build_scene() -> void:
 	shadow.rotation_degrees.x = -90
 	shadow.position.y = 0.003
 	var grad := Gradient.new()
-	grad.set_color(0, Color(0, 0, 0, 0.26))
-	grad.set_color(1, Color(0, 0, 0, 0))
+	grad.set_color(0, SHADOW_COL if MOUSE_LIGHT else Color(0, 0, 0, 0.26))
+	grad.set_color(1, Color(SHADOW_COL, 0.0) if MOUSE_LIGHT else Color(0, 0, 0, 0))
 	var tex := GradientTexture2D.new()
 	tex.gradient = grad
 	tex.fill = GradientTexture2D.FILL_RADIAL
@@ -223,8 +249,34 @@ func _build_scene() -> void:
 	var cam_up := Vector3(0, cos(p), -sin(p))
 	var target := cam_up * ((FEET_Y - WIN_H * 0.5) * k)
 	cam.position = target - cam_fwd * 20.0
+	cam_base = cam.position
+	cam_lift_dir = cam_up
 	add_child(cam)
 	cam.look_at(target, Vector3.UP)
+
+
+# v: 캐릭터 가슴에서 마우스까지(pt, 화면 좌표라 y 는 아래가 +). blend 1 이면 바로 적용.
+func _light_set(v: Vector2, blend: float) -> void:
+	var d := v.length()
+	# 마우스가 아래에 있어도 빛이 턱 밑에서 올라오면 무서워 보여서 아래쪽은 덜 반영한다.
+	var want := Vector3(v.x, -v.y if v.y < 0.0 else -v.y * 0.35, maxf(LIGHT_DEPTH, d * 0.45)).normalized()
+	light_dir = light_dir.lerp(want, blend).normalized()
+	light_near = lerpf(light_near, 1.0 - smoothstep(LIGHT_NEAR, LIGHT_FAR, d), blend)
+	var lw := cam.global_basis * light_dir
+	sun.look_at_from_position(Vector3.ZERO, -lw, Vector3.UP if absf(lw.y) < 0.98 else Vector3.RIGHT)
+	sun.light_energy = lerpf(SUN_FAR, SUN_NEAR, light_near)
+	sun.light_color = SUN_TINT
+	env.ambient_light_energy = LIGHT_PEAK - sun.light_energy
+	env.ambient_light_color = Color.WHITE.lerp(AMB_TINT, light_near)
+	# 발밑 그림자는 빛 반대쪽으로 조금 밀린다.
+	var off := Vector2(-lw.x, -lw.z) / maxf(lw.y, 0.45) * SHADOW_SHIFT * lerpf(0.3, 1.0, light_near)
+	shadow.position.x = off.x
+	shadow.position.z = off.y
+
+
+func _light_step(dt: float) -> void:
+	var chest := _feet() - Vector2(0, lift + CHAR_H * 0.55 * px_scale)
+	_light_set((Vector2(DisplayServer.mouse_get_position()) - chest) / px_scale, 1.0 - exp(-8.0 * dt))
 
 
 func _matte(n: Node) -> void:
@@ -265,25 +317,56 @@ func _cache_bones() -> void:
 
 func _setup_window() -> void:
 	var screen := DisplayServer.window_get_current_screen()
-	px_scale = DisplayServer.screen_get_scale(screen)
+	screen_scale = DisplayServer.screen_get_scale(screen)
+	px_scale = screen_scale * zoom
+	_apply_size()
+	_reset_position()
+	print("screen ", screen, " scale ", px_scale, " usable ", DisplayServer.screen_get_usable_rect(screen), " window ", get_window().size)
+
+
+func _apply_size() -> void:
 	var win := get_window()
 	win.size = Vector2i(roundi(WIN_W * px_scale), roundi(WIN_H * px_scale))
-	var hit := PackedVector2Array([
-		HIT_RECT.position * px_scale,
-		Vector2(HIT_RECT.end.x, HIT_RECT.position.y) * px_scale,
-		HIT_RECT.end * px_scale,
-		Vector2(HIT_RECT.position.x, HIT_RECT.end.y) * px_scale,
-	])
-	DisplayServer.window_set_mouse_passthrough(hit)
-	_reset_position()
-	print("screen ", screen, " scale ", px_scale, " usable ", DisplayServer.screen_get_usable_rect(screen), " window ", win.size)
+	_apply_hit()
+
+
+func _apply_hit() -> void:
+	var a := HIT_RECT.position * px_scale - Vector2(0, lift)
+	var b := HIT_RECT.end * px_scale - Vector2(0, lift)
+	a.y = maxf(a.y, 0.0)
+	DisplayServer.window_set_mouse_passthrough(PackedVector2Array([a, Vector2(b.x, a.y), b, Vector2(a.x, b.y)]))
+
+
+# 창을 win_pos 에 둔다. 메뉴바 위로 올라가야 하면 창은 맨 위에 두고 모자란 만큼 캐릭터를 올려 그린다.
+func _place() -> void:
+	var top := _usable().position.y
+	var y := maxf(win_pos.y, top)
+	var l := minf(y - win_pos.y, (FEET_Y - CHAR_H) * px_scale)
+	DisplayServer.window_set_position(Vector2i(roundi(win_pos.x), roundi(y)))
+	if absf(l - lift) > 0.01:
+		lift = l
+		_apply_hit()
+	if cam:
+		cam.position = cam_base - cam_lift_dir * (lift / px_scale * k)
+
+
+# 점검용(나중에 지울 것): z 를 누르고 있는 동안만 캐릭터를 2배로. 발 위치는 그대로 둔다.
+func _set_zoom(z: float) -> void:
+	if z == zoom:
+		return
+	var feet := _feet()
+	zoom = z
+	px_scale = screen_scale * zoom
+	_apply_size()
+	win_pos = feet - Vector2(WIN_W * 0.5, FEET_Y) * px_scale
+	_place()
 
 
 func _reset_position() -> void:
 	var r := DisplayServer.screen_get_usable_rect(DisplayServer.window_get_current_screen())
 	win_pos = Vector2(r.position.x + r.size.x * 0.5 - WIN_W * px_scale * 0.5,
 		r.end.y - FEET_Y * px_scale - 8.0 * px_scale)
-	DisplayServer.window_set_position(Vector2i(win_pos.round()))
+	_place()
 
 
 func _focus() -> void:
@@ -298,11 +381,6 @@ func _setup_menu() -> void:
 	NativeMenu.add_separator(menu)
 	NativeMenu.add_item(menu, "키보드로 조작하기", func(_tag): _focus())
 	NativeMenu.add_item(menu, "화면 아래 가운데로", func(_tag): _reset_position())
-	NativeMenu.add_separator(menu)
-	var hint := NativeMenu.add_item(menu, "방향키·WASD 이동  Shift 달리기  Space 점프", Callable())
-	NativeMenu.set_item_disabled(menu, hint, true)
-	var hint2 := NativeMenu.add_item(menu, "캐릭터 클릭: 조작  끌기: 옮기기  우클릭: 이 메뉴", Callable())
-	NativeMenu.set_item_disabled(menu, hint2, true)
 	NativeMenu.add_separator(menu)
 	NativeMenu.add_item(menu, "종료", func(_tag): get_tree().quit())
 	var ind := DisplayServer.create_status_indicator(_menu_icon(), "37RHHG", func(_b, _p): pass)
@@ -417,7 +495,7 @@ func _input(event: InputEvent) -> void:
 		if dragging:
 			# 창이 움직이면 창 안 좌표가 흔들리므로 화면 좌표로 계산한다.
 			win_pos = drag_win + Vector2(DisplayServer.mouse_get_position()) - drag_mouse
-			DisplayServer.window_set_position(Vector2i(win_pos.round()))
+			_place()
 
 
 func _key(a: Key, b: Key) -> float:
@@ -456,6 +534,7 @@ func _process(dt: float) -> void:
 		dragging = false
 	if demo:
 		_demo_step()
+	_set_zoom(BASE_ZOOM * (2.0 if Input.is_physical_key_pressed(KEY_Z) else 1.0))
 	_update_rects()
 	var leaping := jump_u >= 0.0 and jump_long
 	var d := Vector2(_key(KEY_RIGHT, KEY_D) - _key(KEY_LEFT, KEY_A),
@@ -484,7 +563,7 @@ func _process(dt: float) -> void:
 		var ahead := feet + move_dir * (24.0 + speed * 0.12) * px_scale
 		for rc in rects:
 			if rc.has_point(feet) != rc.has_point(ahead):
-				print("leap at ", (feet / px_scale + origin).round(), " edge of ", Rect2(rc.position / px_scale + origin, rc.size / px_scale))
+				print("leap at ", (feet / screen_scale + origin).round(), " edge of ", Rect2(rc.position / screen_scale + origin, rc.size / screen_scale))
 				_start_jump(true)
 				break
 
@@ -492,9 +571,10 @@ func _process(dt: float) -> void:
 	win_pos += move_dir * speed * px_scale * dt
 	var r := _usable()
 	win_pos.x = clampf(win_pos.x, r.position.x - HIT_RECT.position.x * px_scale, r.end.x - HIT_RECT.end.x * px_scale)
-	win_pos.y = clampf(win_pos.y, r.position.y, r.end.y - FEET_Y * px_scale - 4.0 * px_scale)
+	# 창 위쪽은 점프할 자리로 비어 있으므로, 머리끝이 화면 위(메뉴바 바로 아래)에 닿을 때까지 올라가게 한다.
+	win_pos.y = clampf(win_pos.y, r.position.y - (FEET_Y - CHAR_H) * px_scale, r.end.y - FEET_Y * px_scale - 4.0 * px_scale)
 	if win_pos != before:
-		DisplayServer.window_set_position(Vector2i(win_pos.round()))
+		_place()
 	var moved := (win_pos - before).length() / px_scale / maxf(dt, 0.0001)
 	anim_speed = lerpf(anim_speed, moved if not dragging else 0.0, 1.0 - exp(-15.0 * dt))
 
@@ -541,19 +621,23 @@ func _process(dt: float) -> void:
 		look_timer = randf_range(1.2, 3.5)
 		look_target = 0.0 if randf() < 0.35 else randf_range(-LOOK_MAX, LOOK_MAX)
 	look = lerpf(look, look_target * (1.0 - w), 1.0 - exp(-4.0 * dt))
+	if MOUSE_LIGHT:
+		_light_step(dt)
 	_face_step(dt, 2 if jump_u >= 0.0 else (1 if run > 0.5 else 0), w < 0.15)
 	_pose(w, run, phase, clock, j, leap)
 
 
 # ---------------------------------------------------------------- 표정
 
-# 감은 눈과 벌린 입은 따로 정한다. 서 있을 때는 감은 눈으로 자주 깜빡인다.
+# 감은 눈과 벌린 입은 따로 정한다. 서 있을 때는 감은 눈으로 자주 깜빡이고, 서 있거나 걸을 때 16~40초마다 0.6~1.4초 입을 벌린다.
 # 달리는 동안: 각자 3~8초마다 한 번씩 기회가 오고, 그때 확률로 0.5~1.3초 동안만 나온다.
 # 점프: 뛸 때마다 따로 확률을 굴려 그 점프 동안만 나온다.
 const RUN_EYES := 0.25
 const RUN_MOUTH := 0.35
 const JUMP_EYES := 0.25
 const JUMP_MOUTH := 0.3
+const IDLE_MOUTH_MIN := 16.0     # 서 있거나 걸을 때 입을 벌리는 간격(초)
+const IDLE_MOUTH_MAX := 40.0
 
 
 func _face_step(dt: float, act: int, idle: bool) -> void:
@@ -585,6 +669,13 @@ func _face_step(dt: float, act: int, idle: bool) -> void:
 		elif act == 0:
 			eyes_left = 0.0
 			mouth_left = 0.0
+			mouth_next = randf_range(IDLE_MOUTH_MIN, IDLE_MOUTH_MAX)
+	if act == 0:
+		# 서 있거나 걸을 때도 가끔 입을 벌린다.
+		mouth_next -= dt
+		if mouth_next <= 0.0:
+			mouth_next = randf_range(IDLE_MOUTH_MIN, IDLE_MOUTH_MAX)
+			mouth_left = randf_range(0.6, 1.4)
 	if act == 1:
 		eyes_next -= dt
 		mouth_next -= dt
@@ -725,5 +816,21 @@ func _take_snapshots() -> void:
 		await get_tree().process_frame
 		await RenderingServer.frame_post_draw
 		get_viewport().get_texture().get_image().save_png("res://snap/%s.png" % f[0])
+	# 마우스 조명: 마우스 위치(가슴 기준 pt)별 전신과 얼굴
+	var lights := [["l_near_left", Vector2(-140, -60)], ["l_near_right", Vector2(140, -60)], ["l_top", Vector2(20, -220)],
+		["l_below", Vector2(60, 200)], ["l_far", Vector2(-1200, -300)], ["l_on", Vector2(0, 0)]]
+	face_mat.set_shader_parameter("debug", false)
+	_face_set(0.0, 0.0, 0.0)
+	for l in lights:
+		_light_set(l[1], 1.0)
+		await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png("res://snap/face_%s.png" % l[0])
 	cam.size = full
+	cam.position = cam_base
+	for l in lights:
+		_light_set(l[1], 1.0)
+		await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png("res://snap/body_%s.png" % l[0])
 	get_tree().quit()

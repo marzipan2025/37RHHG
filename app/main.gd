@@ -66,7 +66,7 @@ var arm_dir0 := Vector3.ZERO   # 오른 위팔·아래팔의 쉴 때 방향(뼈 
 var fore_dir0 := Vector3.ZERO
 var body_mi: MeshInstance3D
 var body_mesh: Mesh            # 평소 메시
-var greet_mesh: Mesh           # 인사용(팔 가중치 고친) 메시
+var greet_mesh: Mesh           # 팔을 크게 들 때(인사·점프) 쓰는, 팔 가중치 고친 메시
 var greet_t := -1.0            # 인사가 시작된 뒤 지난 시간(-1 이면 안 하는 중)
 var greet := 0.0               # 인사 자세 비중(0~1)
 var greet_wave := 0.0          # 손 흔들기(-1~1)
@@ -417,8 +417,8 @@ func _fix_arm_weights(inst: Node) -> void:
 		for b in sk.get_bind_count():
 			bind[sk.get_bind_name(b)] = b
 		var sides := []
-		# 크게 드는 건 인사하는 오른팔뿐이다. 왼팔까지 고치면 달릴 때 왼쪽 가슴이 오히려 찢어져서 오른팔만.
-		for sd in ["Right"]:
+		# 이 메시는 팔을 크게 드는 동안(인사·점프)만 쓰므로 두 팔 다 고친다.
+		for sd in ["Left", "Right"]:
 			var names := [sd + "Arm", sd + "ForeArm", sd + "Hand"]
 			if not (bind.has(names[0]) and bind.has(names[1]) and bind.has(names[2])):
 				continue
@@ -458,7 +458,8 @@ func _fix_arm_weights(inst: Node) -> void:
 						var uv: Vector2 = uvs[k]
 						col = img.get_pixel(clampi(int(fposmod(uv.x, 1.0) * img.get_width()), 0, img.get_width() - 1),
 							clampi(int(fposmod(uv.y, 1.0) * img.get_height()), 0, img.get_height() - 1))
-					var skirt := img != null and col.get_luminance() < 0.4 and col.r - col.g < 0.15
+					# 팔 살(흰 소매·피부)은 밝다. 어두운 것은 치마·가방(왼손 옆)이라 몸으로 본다.
+					var skirt := img != null and col.get_luminance() < 0.48
 					for side in sides:
 						var dh := _seg_dist(v[k], side.ph, side.tip)
 						var dl := minf(dh, _seg_dist(v[k], side.segs[1][0], side.segs[1][1]))
@@ -554,11 +555,10 @@ func _fix_arm_weights(inst: Node) -> void:
 						var p0: int = idx[t + e]
 						var p1: int = idx[t + (e + 1) % 3]
 						nb[p0].append(p1)
-				# 크게 드는 건 인사하는 오른팔뿐이라 그쪽만 다듬는다.
 				var zone := PackedInt32Array()
 				for k in v.size():
 					for side in sides:
-						if side.right and _seg_dist(v[k], side.segs[0][0], side.segs[0][1]) < SMOOTH_R and v[k].y > ARM_CUT_Y - 0.08:
+						if _seg_dist(v[k], side.segs[0][0], side.segs[0][1]) < SMOOTH_R and v[k].y > ARM_CUT_Y - 0.08:
 							zone.append(k)
 							break
 				for it in SMOOTH_ITER:
@@ -1056,6 +1056,10 @@ func _process(dt: float) -> void:
 		look_target = 0.0 if randf() < 0.35 else randf_range(-LOOK_MAX, LOOK_MAX)
 	look = lerpf(look, look_target * (1.0 - w) * (1.0 - greet), 1.0 - exp(-4.0 * dt))
 	_greet_step(dt, d != Vector2.ZERO or leaping or w > 0.05)
+	# 팔을 크게 드는 동안(인사·점프)은 팔 가중치를 고친 메시를 쓴다.
+	var want_mesh := greet_mesh if (greet_t >= 0.0 or jump_u >= 0.0) else body_mesh
+	if body_mi.mesh != want_mesh:
+		body_mi.mesh = want_mesh
 	if MOUSE_LIGHT:
 		_light_step(dt)
 	# 말풍선 도우미는 화면 pt(왼쪽 위 원점)로 받는다.
@@ -1101,9 +1105,6 @@ func _greet_step(dt: float, moving: bool) -> void:
 		greet_t += dt
 		if greet_t >= GREET_UP + GREET_HOLD + GREET_DOWN:
 			greet_t = -1.0
-	var want_mesh := greet_mesh if greet_t >= 0.0 else body_mesh
-	if body_mi.mesh != want_mesh:
-		body_mi.mesh = want_mesh
 	if greet_t < 0.0:
 		greet = 0.0
 		greet_wave = 0.0
@@ -1230,8 +1231,8 @@ func _pose(w: float, run: float, ph: float, t: float, j: float, leap := 0.0) -> 
 		skel.set_bone_pose_position(bones[s + "UpLeg"].i, bones[s + "UpLeg"].o + leg_shift)
 		_rot(s + "Leg", lat, knee)
 		_rot(s + "Foot", lat, foot)
-		var arm := -arm_a * sin(a) + 4.0 * w - 30.0 * j + (25.0 if lead else -70.0) * leap
-		var arm_out := (3.0 + 1.5 * breath) * idle + 4.0 * w + 55.0 * j + 22.0 * leap
+		var arm := -arm_a * sin(a) + 4.0 * w - 15.0 * j + (25.0 if lead else -70.0) * leap
+		var arm_out := (3.0 + 1.5 * breath) * idle + 4.0 * w + 27.0 * j + 22.0 * leap
 		var fore := fore_base - 8.0 * w * maxf(0.0, -sin(a)) - 25.0 * j
 		var q_arm := Quaternion(lat, deg_to_rad(arm)) * Quaternion(fwd, deg_to_rad(arm_out * out_sign))
 		var q_fore := Quaternion(lat, deg_to_rad(fore))
@@ -1328,6 +1329,7 @@ func _take_snapshots() -> void:
 	greet = 0.0
 	body_mi.mesh = body_mesh
 	for s in shots:
+		body_mi.mesh = greet_mesh if s[5] != 0.0 else body_mesh
 		model.rotation.y = s[1]
 		model.position.y = JUMP_H * k * absf(s[5])
 		look = s[6] if s.size() > 6 else 0.0

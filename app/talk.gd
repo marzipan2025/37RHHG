@@ -47,6 +47,10 @@ var bub_thread: Thread
 var bub_mutex := Mutex.new()
 var bub_events: Array[String] = []
 var http: HTTPRequest
+# 화면 복잡도 격자(혼자 돌아다니기용, 도우미가 화면을 작게 찍어 잰다). 비어 있으면 아직 없음.
+# cols, rows, x, y(화면 왼쪽 위, pt), cell(pt), busy, edge(PackedByteArray), t(받은 시각)
+var grid := {}
+var scan_denied := false
 var pending := Callable()
 
 
@@ -156,6 +160,15 @@ func _events() -> void:
 			# 말풍선을 누르면 답장을 쓴다.
 			if mode == SHOW and not waiting:
 				_open(shown, REPLY)
+		elif e.begins_with("grid "):
+			var f := e.split(" ")
+			if f.size() == 8:
+				grid = {"cols": int(f[1]), "rows": int(f[2]), "x": float(f[3]), "y": float(f[4]),
+					"cell": float(f[5]), "busy": Marshalls.base64_to_raw(f[6]),
+					"edge": Marshalls.base64_to_raw(f[7]), "t": Time.get_ticks_msec() / 1000.0}
+				scan_denied = false
+		elif e == "noscan":
+			scan_denied = true
 		elif e == "typing":
 			if typing:
 				composing = true
@@ -181,6 +194,11 @@ func _on_submit(text: String) -> void:
 		_close()
 		return
 	_reply(text)
+
+
+# 그 점(화면 pt)이 있는 화면을 찍어 격자를 새로 받는다.
+func scan(p: Vector2, cell: float) -> void:
+	_send({"op": "scan", "px": p.x, "py": p.y, "cell": cell})
 
 
 # ---------------------------------------------------------------- 메뉴에서 부르는 것

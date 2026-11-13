@@ -83,6 +83,24 @@ var w_walking := false
 var w_timer := 0.0
 var w_dir := Vector2.RIGHT
 var w_run := false
+# 화면을 보고 길 고르기: 같은 색면처럼 밋밋한 곳을 길로 보고 따라 걷다가, 경계선이나 작은 요소가 몰린 곳은
+# 멀리뛰기로 넘는다. 가끔(1 - PATH_CHANCE)은 화면을 무시하고 예전처럼 걷는다.
+const SCAN_CELL := 16.0        # 격자 한 칸(pt)
+const SCAN_EVERY := 4.0        # 돌아다니는 동안 이만큼마다 화면을 다시 본다(초)
+const GRID_FRESH := 12.0       # 이보다 오래된 격자는 안 쓴다
+const PATH_CHANCE := 0.7
+const CALM_BUSY := 24          # 칸의 평균 색 차이(×4)가 이하이고
+const CALM_EDGE := 48          # 가장 센 경계가 이하이면 밋밋한 칸(길)
+const GAP_MAX := 6             # 이 칸 수까지의 막힌 곳은 뛰어넘는다
+const LAND_MIN := 3            # 뛰어서 내릴 곳에 길이 이만큼은 있어야 한다
+const WALL_LIKE := 2.5         # 옆에 벽이 붙은 길을 이만큼 더 좋아한다(비율 × 이 값)
+const NARROW_LIKE := 2.0       # 양옆이 막힌 좁은 틈을 더 좋아하는 정도
+const NARROW := 4              # 양옆 이 칸 수 안에 벽이 있으면 좁은 틈
+const TURN_ALONG := 0.6        # 걷다 멈춘 자리에서 벽을 따라 꺾어 이어 갈 확률
+var w_plan: Array = []         # [{"to": 발 위치(화면 pt), "dir": Vector2i, "leap": bool}]
+var w_leaping := false
+var leap_speed := LEAP_SPEED
+var scan_t := 0.0
 var w_stuck := 0.0
 
 var origin := Vector2.ZERO     # Godot 화면 좌표 (0,0) 을 주 화면 왼쪽 위 기준 pt 로(말 도우미에 넘길 때 쓴다)
@@ -851,6 +869,9 @@ func _pick_dir() -> Vector2:
 
 
 func _wander_step(dt: float) -> void:
+	if not w_plan.is_empty():
+		_follow_plan()
+		return
 	w_timer -= dt
 	if w_timer > 0.0:
 		return
@@ -860,11 +881,255 @@ func _wander_step(dt: float) -> void:
 		w_timer = randf_range(1.5, 5.0)
 		if randf() < 0.5:
 			target_yaw = 0.0
+	elif randf() < PATH_CHANCE and _plan():
+		w_walking = true
+		w_run = randf() < 0.15
 	else:
 		w_walking = true
 		w_timer = randf_range(2.0, 6.0)
 		w_run = randf() < 0.25
 		w_dir = _pick_dir()
+
+
+func _feet_pt() -> Vector2:
+	return _feet() / screen_scale + origin
+
+
+# 발이 갈 수 있는 범위(화면 pt). 창 위치를 자르는 범위(_process)와 같다.
+func _feet_bounds() -> Rect2:
+	var r := _usable()
+	var a := r.position / screen_scale + origin
+	var b := r.end / screen_scale + origin
+	a += Vector2(44.0, CHAR_H) * zoom
+	b -= Vector2(44.0, 4.0) * zoom
+	return Rect2(a, b - a)
+
+
+func _cell_pt(c: Vector2i) -> Vector2:
+	var g: Dictionary = talk.grid
+	return Vector2(g.x, g.y) + (Vector2(c) + Vector2(0.5, 0.5)) * float(g.cell)
+
+
+# 발이 그 칸에 서도 되나: 화면 안이고, 칸과 좌우 칸(몸 폭)이 밋밋하다.
+func _calm(c: Vector2i) -> bool:
+	var g: Dictionary = talk.grid
+	if not _feet_bounds().has_point(_cell_pt(c)):
+		return false
+	for dx in [-1, 0, 1]:
+		var x: int = c.x + dx
+		if x < 0 or x >= int(g.cols) or c.y < 0 or c.y >= int(g.rows):
+			return false
+		var i: int = c.y * int(g.cols) + x
+		if g.busy[i] > CALM_BUSY or g.edge[i] > CALM_EDGE:
+			return false
+	return true
+
+
+# 칸 하나가 거친가(글자·경계). 격자 밖은 거칠지 않다고 본다(화면 가장자리를 벽으로 치지 않게).
+func _rough(c: Vector2i) -> bool:
+	var g: Dictionary = talk.grid
+	if c.x < 0 or c.y < 0 or c.x >= int(g.cols) or c.y >= int(g.rows):
+		return false
+	var i: int = c.y * int(g.cols) + c.x
+	return g.busy[i] > CALM_BUSY or g.edge[i] > CALM_EDGE
+
+
+# 그 칸에서 dir 로 걸을 때 옆에 벽이 붙어 있나(1), 양옆이 가까이 막힌 좁은 틈인가(2), 아니면 0.
+# 옆으로 걸을 때는 발 바로 위·아래 칸(경계선 위를 걷는 느낌), 위아래로 걸을 때는 몸 폭 바깥 칸을 본다.
+func _beside(c: Vector2i, dir: Vector2i) -> int:
+	var side := Vector2i(0, 1) if dir.y == 0 else Vector2i(1, 0)
+	var near := 1 if dir.y == 0 else 2
+	var wall := _rough(c + side * near) or _rough(c - side * near)
+	var a := false
+	var b := false
+	for i in range(near, near + NARROW):
+		a = a or _rough(c + side * i)
+		b = b or _rough(c - side * i)
+	if a and b:
+		return 2
+	return 1 if wall else 0
+
+
+# 한 방향으로 갈 수 있는 길: 걸을 칸 수, 막힌 칸 수, 그 너머 내릴 길 칸 수, 벽 따라가기·좁은 틈 비율.
+func _run(start: Vector2i, dir: Vector2i) -> Dictionary:
+	var bounds := _feet_bounds()
+	var n := 0
+	var wall := 0
+	var narrow := 0
+	var last_wall := 0
+	while n < 60 and _calm(start + dir * (n + 1)):
+		n += 1
+		var bs := _beside(start + dir * n, dir)
+		if bs > 0:
+			wall += 1
+			last_wall = n
+		if bs == 2:
+			narrow += 1
+	var k := 0
+	while k <= GAP_MAX and bounds.has_point(_cell_pt(start + dir * (n + 1 + k))) \
+			and not _calm(start + dir * (n + 1 + k)):
+		k += 1
+	var land := 0
+	if k >= 1 and k <= GAP_MAX:
+		while land < 40 and _calm(start + dir * (n + 1 + k + land)):
+			land += 1
+	var r := {"dir": dir, "n": n, "k": k, "land": land, "jump": land >= LAND_MIN,
+		"wall": float(wall) / maxf(1.0, n), "narrow": float(narrow) / maxf(1.0, n), "last_wall": last_wall}
+	var cell: float = talk.grid.cell
+	var wgt: float = float(n) * cell * (1.0 + WALL_LIKE * r.wall + NARROW_LIKE * r.narrow) + (90.0 if r.jump else 0.0)
+	if n < 2 and not r.jump:
+		wgt = 0.0
+	r.wgt = wgt
+	return r
+
+
+func _choose(opts: Array) -> Dictionary:
+	var total := 0.0
+	for o in opts:
+		total += float(o.wgt)
+	if total <= 0.0:
+		return {}
+	var pick := randf() * total
+	for o in opts:
+		pick -= float(o.wgt)
+		if pick <= 0.0:
+			return o
+	return opts[-1]
+
+
+# 지금 자리에서 네 방향을 보고 길을 골라 계획을 세운다. 벽을 따라가는 길과 좁은 틈을 더 좋아하고,
+# 짧게 막힌 곳 너머에 길이 있으면 뛰어넘는다. 벽에 막혀 멈추면 반쯤은 그 벽을 따라 꺾어 이어 간다.
+func _plan() -> bool:
+	var g: Dictionary = talk.grid
+	if g.is_empty() or Time.get_ticks_msec() / 1000.0 - float(g.t) > GRID_FRESH:
+		return false
+	var fp := _feet_pt()
+	var cur := Vector2i(((fp - Vector2(g.x, g.y)) / float(g.cell)).floor())
+	var cur_pt := fp
+	w_plan = []
+	var cells_walk: Array[Vector2i] = []
+	var cells_leap: Array[Vector2i] = []
+	var came := Vector2i(roundi(w_dir.x), roundi(w_dir.y))
+	for leg in 3:
+		var opts := []
+		for dir in [Vector2i.RIGHT, Vector2i.LEFT, Vector2i.UP, Vector2i.DOWN]:
+			if leg > 0 and (dir == came or dir == -came):
+				continue        # 이어 가는 다리는 꺾어서만
+			var o := _run(cur, dir)
+			if dir.y != 0:
+				o.wgt *= 0.5
+			if leg == 0 and dir == -came:
+				o.wgt *= 0.6
+			if leg > 0:
+				o.wgt *= o.wall     # 꺾을 때는 벽을 따라가는 쪽만
+			opts.append(o)
+		var o := _choose(opts)
+		if o.is_empty():
+			break
+		var dir: Vector2i = o.dir
+		var n: int = o.n
+		# 방향 축의 좌표만 칸 가운데로 맞추고, 다른 축은 지금 위치 그대로(사선 없음).
+		var to := func(c: Vector2i) -> Vector2:
+			var p := _cell_pt(c)
+			return Vector2(p.x, cur_pt.y) if dir.y == 0 else Vector2(cur_pt.x, p.y)
+		var end := cur
+		var leaped := false
+		if o.jump and (randf() < 0.65 or n < 3):
+			if n > 0:
+				w_plan.append({"to": to.call(cur + dir * n), "dir": dir, "leap": false})
+			w_plan.append({"to": to.call(cur + dir * (n + 1 + o.k)), "dir": dir, "leap": true})
+			var m := randi_range(1, maxi(1, int(o.land) - 1))
+			end = cur + dir * (n + 1 + int(o.k) + m)
+			w_plan.append({"to": to.call(end), "dir": dir, "leap": false})
+			for i in n + 1:
+				cells_walk.append(cur + dir * i)
+			for i in int(o.k):
+				cells_leap.append(cur + dir * (n + 1 + i))
+			for i in m + 1:
+				cells_walk.append(cur + dir * (n + 1 + int(o.k) + i))
+			leaped = true
+		else:
+			var m := randi_range(mini(n, maxi(2, n / 2)), n)
+			if o.wall > 0.5:
+				# 벽을 따라갈 때는 벽이 끝나는 모퉁이나 길 끝까지 간다.
+				m = int(o.last_wall) if int(o.last_wall) >= 2 and randf() < 0.5 else n
+			end = cur + dir * m
+			w_plan.append({"to": to.call(end), "dir": dir, "leap": false})
+			for i in m + 1:
+				cells_walk.append(cur + dir * i)
+		print("plan leg ", leg, " ", dir, " walk ", n, " gap ", o.k, " wall ", snappedf(o.wall, 0.01),
+			" narrow ", snappedf(o.narrow, 0.01))
+		cur_pt = w_plan[-1].to
+		cur = end
+		came = dir
+		# 벽 앞에서 멈췄으면 반쯤은 벽을 따라 꺾어 이어 간다.
+		if leaped or randf() > TURN_ALONG:
+			break
+	if w_plan.is_empty():
+		return false
+	w_dir = Vector2(w_plan[0].dir)
+	if FileAccess.file_exists("user://scan_debug"):
+		_dump_plan(cells_walk, cells_leap)
+	return true
+
+
+func _follow_plan() -> void:
+	var st: Dictionary = w_plan[0]
+	w_dir = Vector2(st.dir)
+	var rem := (Vector2(st.to) - _feet_pt()).dot(w_dir)
+	if st.leap:
+		if not w_leaping:
+			if jump_u >= 0.0:
+				return
+			w_leaping = true
+			leap_speed = clampf(rem / LEAP_TIME, 60.0, 260.0)
+			move_dir = w_dir
+			target_yaw = atan2(move_dir.x, move_dir.y + 0.35 * absf(move_dir.x))
+			_start_jump(true)
+		elif jump_u < 0.0:
+			w_leaping = false
+			w_plan.pop_front()
+	elif rem <= 1.5:
+		w_plan.pop_front()
+	if w_plan.is_empty():
+		w_walking = false
+		w_timer = randf_range(1.5, 5.0)
+		if randf() < 0.5:
+			target_yaw = 0.0
+
+
+func _drop_plan() -> void:
+	w_plan.clear()
+	w_leaping = false
+
+
+# 확인용: user://scan_debug 파일이 있으면 계획을 세울 때마다 격자 그림을 user://scan.png 로 남긴다.
+# 회색 = 복잡도, 빨강 = 센 경계, 초록 = 걸을 칸, 파랑 = 뛰어넘을 칸, 노랑 = 출발.
+func _dump_plan(walk: Array[Vector2i], leap: Array[Vector2i]) -> void:
+	var g: Dictionary = talk.grid
+	var cols: int = g.cols
+	var rows: int = g.rows
+	var img := Image.create(cols, rows, false, Image.FORMAT_RGB8)
+	for y in rows:
+		for x in cols:
+			var i := y * cols + x
+			var b: float = 1.0 - minf(1.0, g.busy[i] / 120.0)
+			var c := Color(b, b, b)
+			if g.edge[i] > CALM_EDGE:
+				c = c.lerp(Color.RED, 0.5)
+			if _calm(Vector2i(x, y)):
+				c = c.lerp(Color(0.7, 0.85, 1.0), 0.3)
+			img.set_pixel(x, y, c)
+	for c in walk:
+		if c.x >= 0 and c.y >= 0 and c.x < cols and c.y < rows:
+			img.set_pixel(c.x, c.y, Color.GREEN)
+	for c in leap:
+		if c.x >= 0 and c.y >= 0 and c.x < cols and c.y < rows:
+			img.set_pixel(c.x, c.y, Color.BLUE)
+	if not walk.is_empty():
+		img.set_pixel(walk[0].x, walk[0].y, Color.YELLOW)
+	img.resize(cols * 8, rows * 8, Image.INTERPOLATE_NEAREST)
+	img.save_png("user://scan.png")
 
 
 func _start_jump(long: bool) -> void:
@@ -980,9 +1245,13 @@ func _process(dt: float) -> void:
 	# 입력칸이 떠 있는 동안은 돌아다니지 않고 정면을 본다.
 	if talk.typing:
 		w_walking = false
+		_drop_plan()
 		if not dragging:
 			target_yaw = 0.0
-	elif d == Vector2.ZERO and wander and not dragging and greet_t < 0.0:
+	elif d != Vector2.ZERO or dragging:
+		if not w_leaping:
+			_drop_plan()
+	elif wander and greet_t < 0.0:
 		_wander_step(dt)
 		if w_walking:
 			d = w_dir
@@ -994,9 +1263,15 @@ func _process(dt: float) -> void:
 		else:
 			d.x = 0.0
 	var target_speed := 0.0
+	if wander and not dragging:
+		scan_t -= dt
+		if scan_t <= 0.0:
+			scan_t = 30.0 if talk.scan_denied else SCAN_EVERY
+			talk.scan(_feet_pt(), SCAN_CELL)
 	if leaping:
-		# 멀리뛰기 중에는 방향을 바꾸지 않고 앞으로 쭉 나간다.
-		target_speed = LEAP_SPEED
+		# 멀리뛰기 중에는 방향을 바꾸지 않고 앞으로 쭉 나간다(속도는 뛰어넘을 거리에 맞춘다).
+		target_speed = leap_speed
+		speed = leap_speed
 	elif d != Vector2.ZERO and not dragging:
 		move_dir = d.normalized()
 		# 옆으로 걸을 때 완전한 옆모습이면 머리카락이 얼굴을 가려서 70도 정도만 돌린다.
@@ -1021,6 +1296,7 @@ func _process(dt: float) -> void:
 		if w_stuck > 0.25:
 			w_stuck = 0.0
 			# 막히면 되돌아가거나 직각으로 꺾는다(사선 없음).
+			_drop_plan()
 			w_dir = -w_dir if randf() < 0.5 else _pick_dir()
 			if w_dir.dot(move_dir) > 0.5:
 				w_dir = -w_dir

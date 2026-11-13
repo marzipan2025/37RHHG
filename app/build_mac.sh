@@ -12,6 +12,10 @@ godot --headless --path . --export-release "macOS" "$OUT" 2>&1 | grep -E "ERROR"
 [ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$OUT/Contents/Info.plist")" = "true" ] || { echo "LSUIElement 누락"; exit 1; }
 # 말 도우미를 실행 파일 옆에 둔다.
 cp helper/bubble "$OUT/Contents/MacOS/bubble"
-codesign --force --deep -s - "$OUT"
+# Apple Development 인증서가 있으면 그걸로 서명한다. 임시 서명(-)은 빌드마다 서명이 달라져서
+# 화면 기록 권한(혼자 돌아다니기의 화면 보기)이 빌드할 때마다 풀린다.
+ID=$(security find-identity -v -p codesigning 2>/dev/null | grep -m1 "Apple Development" | awk '{print $2}')
+codesign --force --deep -s "${ID:--}" "$OUT"
+echo "서명: ${ID:-임시}"
 codesign -v "$OUT"
 echo "완료: $OUT"

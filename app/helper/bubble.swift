@@ -7,10 +7,13 @@
 //   {"op":"input","mode":"reply|key", …}            발치에 입력칸
 //   {"op":"move","x":..,"y":..,"fy":..}
 //   {"op":"hidetext"} {"op":"hideinput"} {"op":"hide"}
+//   {"op":"scan","px":..,"py":..,"cell":16}         그 점이 있는 화면을 찍어 칸마다 복잡도를 잰다(혼자 돌아다니기용)
 // 표준 출력(한 줄씩): "over"/"out"(마우스가 글씨 위에 들어옴/나감) | "click"(글씨를 누름) | "typing"(입력칸에 처음 글을 침)
 //                   | "esc"(Esc, 또는 아무것도 안 친 채 5초) | "submit <base64 글>"
+//                   | "grid <열> <행> <화면 x> <화면 y> <칸 pt> <base64 busy> <base64 edge>" | "noscan"(권한 없음·실패)
 // 표준 입력이 닫히면(앱이 끝나면) 같이 끝난다.
 import Cocoa
+import ScreenCaptureKit
 
 let textMaxW: CGFloat = 320    // 글 최대 폭(상자 안쪽)
 let fontSize: CGFloat = 14     // 입력칸과 같은 크기·글꼴, 굵기만 조금 더
@@ -18,8 +21,86 @@ let textPad = NSSize(width: 14, height: 9)   // 상자 안 여백
 let inputW: CGFloat = 240
 let inputIdle: TimeInterval = 5.0   // 입력이 이만큼 없으면 입력칸을 닫는다(답장일 때만)
 
+let emitLock = NSLock()
 func emit(_ s: String) {
+    emitLock.lock()
     FileHandle.standardOutput.write((s + "\n").data(using: .utf8)!)
+    emitLock.unlock()
+}
+
+// ---------------------------------------------------------------- 화면 복잡도 격자
+// 화면을 작게 찍어 칸(cell pt)마다 이웃 화소끼리의 색 차이를 잰다. busy 는 평균(글자·아이콘이 많은 곳),
+// edge 는 최댓값(경계선). 찍은 그림은 저장하지 않고 숫자만 넘긴다. 이 앱 자신과 Godot 창은 빼고 찍는다.
+let scanSub = 8                 // 칸 하나를 이만큼의 화소로 본다
+var scanAsked = false
+var scanBusy = false
+
+func scan(at p: CGPoint, cell: CGFloat) {
+    guard #available(macOS 14.0, *) else { emit("noscan"); return }
+    if !CGPreflightScreenCaptureAccess() {
+        if !scanAsked { scanAsked = true; CGRequestScreenCaptureAccess() }
+        emit("noscan")
+        return
+    }
+    if scanBusy { return }
+    scanBusy = true
+    Task {
+        defer { scanBusy = false }
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            guard let disp = content.displays.first(where: { $0.frame.contains(p) }) ?? content.displays.first else {
+                emit("noscan"); return
+            }
+            let mine = content.applications.filter { $0.processID == getpid() || $0.processID == getppid() }
+            let filter = SCContentFilter(display: disp, excludingApplications: mine, exceptingWindows: [])
+            let cols = Int(disp.frame.width / cell), rows = Int(disp.frame.height / cell)
+            let cfg = SCStreamConfiguration()
+            cfg.width = cols * scanSub
+            cfg.height = rows * scanSub
+            cfg.showsCursor = false
+            let img = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg)
+            let (busy, edge) = measure(img, cols: cols, rows: rows)
+            let f = disp.frame
+            emit("grid \(cols) \(rows) \(f.minX) \(f.minY) \(cell) \(busy.base64EncodedString()) \(edge.base64EncodedString())")
+        } catch {
+            emit("noscan")
+        }
+    }
+}
+
+func measure(_ img: CGImage, cols: Int, rows: Int) -> (Data, Data) {
+    let w = cols * scanSub, h = rows * scanSub
+    var px = [UInt8](repeating: 0, count: w * h * 4)
+    px.withUnsafeMutableBytes { buf in
+        let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        ctx.interpolationQuality = .medium
+        ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
+    }
+    // 화소마다 오른쪽·아래 이웃과의 가장 큰 채널 차이(0~255)
+    func diff(_ a: Int, _ b: Int) -> Int {
+        max(abs(Int(px[a]) - Int(px[b])), abs(Int(px[a + 1]) - Int(px[b + 1])), abs(Int(px[a + 2]) - Int(px[b + 2])))
+    }
+    var busy = Data(count: cols * rows), edge = Data(count: cols * rows)
+    for cy in 0..<rows {
+        for cx in 0..<cols {
+            var sum = 0, mx = 0
+            for y in cy * scanSub..<(cy + 1) * scanSub {
+                for x in cx * scanSub..<(cx + 1) * scanSub {
+                    let i = (y * w + x) * 4
+                    var d = 0
+                    if x + 1 < w { d = diff(i, i + 4) }
+                    if y + 1 < h { d = max(d, diff(i, i + w * 4)) }
+                    sum += d
+                    mx = max(mx, d)
+                }
+            }
+            let mean = sum / (scanSub * scanSub)
+            busy[cy * cols + cx] = UInt8(min(255, mean * 4))
+            edge[cy * cols + cx] = UInt8(mx)
+        }
+    }
+    return (busy, edge)
 }
 
 // 유리 상자 안의 말. 글씨 색은 시스템 글자색이라 라이트/다크 모드를 저절로 따른다.
@@ -293,6 +374,7 @@ final class Talk: NSObject, NSTextFieldDelegate {
         case "hidetext": textPanel.orderOut(nil)
         case "hideinput": hideInput()
         case "hide": textPanel.orderOut(nil); hideInput()
+        case "scan": scan(at: CGPoint(x: j["px"] as? Double ?? 0, y: j["py"] as? Double ?? 0), cell: CGFloat(j["cell"] as? Double ?? 16))
         default: break
         }
     }

@@ -22,6 +22,7 @@ enum { HIDDEN, SHOW, REPLY, KEY }
 const MODE_NAME := ["", "show", "reply", "key"]
 
 var typing := false            # 글을 치는 중(이때는 캐릭터 조작 키를 무시해야 한다)
+var composing := false         # 입력칸에 실제로 글을 치기 시작했다(캐릭터는 정면을 보고 멈춘다)
 var anchor := Vector2.ZERO     # 머리끝 가운데(화면 pt, 왼쪽 위 원점)
 var feet_y := 0.0              # 발 높이(화면 pt). 답장 입력칸은 발치에 둔다.
 var sent_anchor := Vector2(-1e9, -1e9)
@@ -111,6 +112,7 @@ func _open(text: String, m: int, seconds := 0.0) -> void:
 	mode = m
 	shown = text
 	typing = m != SHOW
+	composing = false
 	show_left = seconds
 	sent_anchor = anchor
 	var at := {"x": anchor.x, "y": anchor.y, "fy": feet_y}
@@ -129,6 +131,7 @@ func _close() -> void:
 	mode = HIDDEN
 	text_hover = false
 	typing = false
+	composing = false
 	waiting = false
 	_send({"op": "hide"})
 
@@ -153,6 +156,9 @@ func _events() -> void:
 			# 말풍선을 누르면 답장을 쓴다.
 			if mode == SHOW and not waiting:
 				_open(shown, REPLY)
+		elif e == "typing":
+			if typing:
+				composing = true
 		elif e == "esc":
 			_close()
 		elif e.begins_with("submit "):
@@ -223,6 +229,7 @@ func step(dt: float) -> void:
 				bub_thread.wait_to_finish()
 			mode = HIDDEN
 			typing = false
+			composing = false
 			waiting = false
 			_start_bubble()
 	_events()

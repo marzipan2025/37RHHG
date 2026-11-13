@@ -977,7 +977,12 @@ func _process(dt: float) -> void:
 	var d := Vector2(_key(KEY_RIGHT, KEY_D) - _key(KEY_LEFT, KEY_A),
 		_key(KEY_DOWN, KEY_S) - _key(KEY_UP, KEY_W))
 	var shift: bool = (Input.is_physical_key_pressed(KEY_SHIFT) and not talk.typing) or KEY_SHIFT in demo_keys
-	if d == Vector2.ZERO and wander and not dragging and greet_t < 0.0:
+	# 사용자가 답장을 치는 동안은 돌아다니지 않고 정면을 본다(Esc·Enter 까지).
+	if talk.composing:
+		w_walking = false
+		if not dragging:
+			target_yaw = 0.0
+	elif d == Vector2.ZERO and wander and not dragging and greet_t < 0.0:
 		_wander_step(dt)
 		if w_walking:
 			d = w_dir
@@ -1054,7 +1059,8 @@ func _process(dt: float) -> void:
 	if look_timer <= 0.0:
 		look_timer = randf_range(1.2, 3.5)
 		look_target = 0.0 if randf() < 0.35 else randf_range(-LOOK_MAX, LOOK_MAX)
-	look = lerpf(look, look_target * (1.0 - w) * (1.0 - greet), 1.0 - exp(-4.0 * dt))
+	var look_to := 0.0 if talk.composing else look_target
+	look = lerpf(look, look_to * (1.0 - w) * (1.0 - greet), 1.0 - exp(-4.0 * dt))
 	_greet_step(dt, d != Vector2.ZERO or leaping or w > 0.05)
 	# 팔을 크게 드는 동안(인사·점프)은 팔 가중치를 고친 메시를 쓴다.
 	var want_mesh := greet_mesh if (greet_t >= 0.0 or jump_u >= 0.0) else body_mesh

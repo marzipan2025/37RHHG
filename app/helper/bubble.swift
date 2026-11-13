@@ -7,7 +7,8 @@
 //   {"op":"input","mode":"reply|key", …}            발치에 입력칸
 //   {"op":"move","x":..,"y":..,"fy":..}
 //   {"op":"hidetext"} {"op":"hideinput"} {"op":"hide"}
-// 표준 출력(한 줄씩): "over"/"out"(마우스가 글씨 위에 들어옴/나감) | "click"(글씨를 누름) | "esc"(Esc 또는 5초간 입력 없음) | "submit <base64 글>"
+// 표준 출력(한 줄씩): "over"/"out"(마우스가 글씨 위에 들어옴/나감) | "click"(글씨를 누름) | "typing"(입력칸에 처음 글을 침)
+//                   | "esc"(Esc, 또는 아무것도 안 친 채 5초) | "submit <base64 글>"
 // 표준 입력이 닫히면(앱이 끝나면) 같이 끝난다.
 import Cocoa
 
@@ -90,6 +91,12 @@ final class InputPanel: NSPanel {
         return super.performKeyEquivalent(with: e)
     }
     override func cancelOperation(_ sender: Any?) { emit("esc") }
+    // 한글 조합 중에는 글이 바뀐 알림이 늦을 수 있어서, 키를 누르는 것 자체도 입력 시작으로 본다.
+    var onKey: (() -> Void)?
+    override func sendEvent(_ e: NSEvent) {
+        if e.type == .keyDown, e.keyCode != 53 { onKey?() }
+        super.sendEvent(e)
+    }
 }
 
 func makePanel<T: NSPanel>(_ type: T.Type, shadow: Bool) -> T {
@@ -114,12 +121,14 @@ final class Talk: NSObject, NSTextFieldDelegate {
     var feetY: CGFloat = 0
     var idle: Timer?
     var idleOn = false
+    var typed = false
     var prevApp: NSRunningApplication?
 
     override init() {
         super.init()
         textPanel.contentView = glass(textView)
         inputPanel.contentView = glass(inputBox)
+        inputPanel.onKey = { [weak self] in self?.startTyping() }
     }
 
     func glass(_ content: NSView) -> NSView {
@@ -223,10 +232,20 @@ final class Talk: NSObject, NSTextFieldDelegate {
         inputPanel.makeFirstResponder(field)
         place()
         idleOn = mode != "key"
+        typed = false
         touch()
     }
 
-    // 입력이 있을 때마다 5초 타이머를 다시 건다.
+    // 글을 치기 시작하면 Esc 나 Enter 전까지 입력칸을 닫지 않는다.
+    func startTyping() {
+        if typed { return }
+        typed = true
+        idleOn = false
+        touch()
+        emit("typing")
+    }
+
+    // 입력칸을 열 때 5초 타이머를 건다(글을 치기 시작하면 끈다).
     func touch() {
         idle?.invalidate()
         idle = nil
@@ -254,7 +273,7 @@ final class Talk: NSObject, NSTextFieldDelegate {
         emit("submit " + d.base64EncodedString())
     }
 
-    func controlTextDidChange(_ obj: Notification) { touch() }
+    func controlTextDidChange(_ obj: Notification) { startTyping() }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
         if sel == #selector(NSResponder.cancelOperation(_:)) {

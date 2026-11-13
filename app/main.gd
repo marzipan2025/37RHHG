@@ -85,7 +85,7 @@ var w_dir := Vector2.RIGHT
 var w_run := false
 # 화면을 보고 길 고르기: 같은 색면처럼 밋밋한 곳을 길로 보고 따라 걷다가, 경계선이나 작은 요소가 몰린 곳은
 # 멀리뛰기로 넘는다. 가끔(1 - PATH_CHANCE)은 화면을 무시하고 예전처럼 걷는다.
-const SCAN_CELL := 16.0        # 격자 한 칸(pt)
+const SCAN_CELL := 16.0        # 격자 한 칸(pt). 발자국 크기로, 접촉은 이 한 칸으로만 따진다.
 const SCAN_EVERY := 4.0        # 돌아다니는 동안 이만큼마다 화면을 다시 본다(초)
 const GRID_FRESH := 12.0       # 이보다 오래된 격자는 안 쓴다
 const PATH_CHANCE := 0.7
@@ -910,19 +910,15 @@ func _cell_pt(c: Vector2i) -> Vector2:
 	return Vector2(g.x, g.y) + (Vector2(c) + Vector2(0.5, 0.5)) * float(g.cell)
 
 
-# 발이 그 칸에 서도 되나: 화면 안이고, 칸과 좌우 칸(몸 폭)이 밋밋하다.
+# 발이 그 칸에 서도 되나: 화면 안이고, 발자국 자리(그 칸 하나)가 밋밋하다. 몸통은 따지지 않는다.
 func _calm(c: Vector2i) -> bool:
 	var g: Dictionary = talk.grid
+	if c.x < 0 or c.y < 0 or c.x >= int(g.cols) or c.y >= int(g.rows):
+		return false
 	if not _feet_bounds().has_point(_cell_pt(c)):
 		return false
-	for dx in [-1, 0, 1]:
-		var x: int = c.x + dx
-		if x < 0 or x >= int(g.cols) or c.y < 0 or c.y >= int(g.rows):
-			return false
-		var i: int = c.y * int(g.cols) + x
-		if g.busy[i] > CALM_BUSY or g.edge[i] > CALM_EDGE:
-			return false
-	return true
+	var i: int = c.y * int(g.cols) + c.x
+	return g.busy[i] <= CALM_BUSY and g.edge[i] <= CALM_EDGE
 
 
 # 칸 하나가 거친가(글자·경계). 격자 밖은 거칠지 않다고 본다(화면 가장자리를 벽으로 치지 않게).
@@ -935,10 +931,10 @@ func _rough(c: Vector2i) -> bool:
 
 
 # 그 칸에서 dir 로 걸을 때 옆에 벽이 붙어 있나(1), 양옆이 가까이 막힌 좁은 틈인가(2), 아니면 0.
-# 옆으로 걸을 때는 발 바로 위·아래 칸(경계선 위를 걷는 느낌), 위아래로 걸을 때는 몸 폭 바깥 칸을 본다.
+# 발자국 바로 옆 칸을 본다(옆으로 걸을 땐 위·아래, 위아래로 걸을 땐 좌우).
 func _beside(c: Vector2i, dir: Vector2i) -> int:
 	var side := Vector2i(0, 1) if dir.y == 0 else Vector2i(1, 0)
-	var near := 1 if dir.y == 0 else 2
+	var near := 1
 	var wall := _rough(c + side * near) or _rough(c - side * near)
 	var a := false
 	var b := false

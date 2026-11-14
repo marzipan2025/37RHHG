@@ -20,6 +20,9 @@ const MEMO_CHARS := 800
 
 const NUDGE_SHOW := 15.0       # 캐릭터가 혼자 먼저 건 말이 떠 있는 시간(초)
 const SHOW_TIME := 5.0         # 말이 떠 있는 시간(초). 이 안에 글씨를 누르면 답장할 수 있다.
+# 말 길이 상한(글자, 띄어쓰기 포함). 프롬프트로 정하고, 넘겨 오면 한 번만 줄여 다시 쓰게 한다(자르지 않는다).
+const NUDGE_MAX_CHARS := 50
+const REPLY_MAX_CHARS := 80
 
 enum { HIDDEN, SHOW, REPLY, KEY }
 const MODE_NAME := ["", "show", "reply", "key"]
@@ -342,7 +345,7 @@ func _system() -> String:
 		+ "- 뻔한 안부(날씨, 밥, 피곤하지) 대신 사용자가 하던 일이나 좋아하는 것에서 이야기를 꺼낸다. 질문은 한 번에 하나만.\n"
 		+ "- 사용자가 생각이나 고민을 말하면 먼저 그 마음을 알아주고, 그다음 네 생각을 궁금해하는 말투로 살짝 보탠다(\"이렇게 해 보면 어때?\" 식).\n"
 		+ "- 너는 화면 밖 세상을 볼 수 없다. 날씨·뉴스·시세처럼 모르는 사실은 지어내지 말고 모른다고 한다.\n"
-		+ "- 먼저 말을 걸 때는 한두 문장 70자 이내. 질문에 답할 때는 필요하면 세 문장 140자까지. 이모지와 마크다운은 쓰지 않는다.\n"
+		+ ("- 짧게 말한다. 먼저 말을 걸 때는 한 문장 %d자 이내, 대답할 때는 한두 문장 %d자 이내(띄어쓰기 포함). 이 길이를 절대 넘기지 않는다. 줄바꿈, 이모지, 마크다운은 쓰지 않는다.\n" % [NUDGE_MAX_CHARS, REPLY_MAX_CHARS])
 		+ "말투 예시(그대로 쓰지 말고 느낌만 따라라):\n"
 		+ "- 어제 말한 그 앱, 이름은 정했어? 나 후보 듣고 싶어.\n"
 		+ "- 와, 그거 진짜 좋은 생각이다. 처음엔 작게 한번 해 보는 건 어때?\n"
@@ -433,7 +436,7 @@ func _nudge(poked: bool) -> void:
 		return
 	var prompt := "최근 대화:\n%s\n(사용자는 지금 아무 말도 하지 않았다. 네가 먼저 한마디 걸어라. " % _recent()
 	prompt += "기억의 '이어갈 것'이나 최근 대화에서 하나를 골라 그 뒤가 어떻게 됐는지 다정하게 묻거나, 사용자의 관심사에 대해 네가 궁금했던 것을 한마디 건네라. "
-	prompt += "기억이 없으면 사용자가 요즘 무엇에 빠져 있는지 물어라. 네가 최근에 한 말이나 질문을 되풀이하지 마라.)"
+	prompt += "기억이 없으면 사용자가 요즘 무엇에 빠져 있는지 물어라. 네가 최근에 한 말이나 질문을 되풀이하지 마라. 한 문장 %d자 이내.)" % NUDGE_MAX_CHARS
 	var done := func(text: String, _code: int):
 		if text.is_empty():
 			if waiting:
@@ -441,11 +444,12 @@ func _nudge(poked: bool) -> void:
 			return
 		if mode != HIDDEN and not waiting:
 			return
-		_push("m", text)
-		state.turns[-1]["n"] = true      # 먼저 건 말(아직 답을 못 받음)
-		_save()
-		# 혼자 먼저 건 말은 사용자가 못 보고 지나치기 쉬워서 더 오래 띄운다.
-		say(text, 0.0 if poked else NUDGE_SHOW)
+		_fit(text, NUDGE_MAX_CHARS, func(t: String):
+			_push("m", t)
+			state.turns[-1]["n"] = true      # 먼저 건 말(아직 답을 못 받음)
+			_save()
+			# 혼자 먼저 건 말은 사용자가 못 보고 지나치기 쉬워서 더 오래 띄운다.
+			say(t, 0.0 if poked else NUDGE_SHOW))
 	if _call(_system(), prompt, 0, done):
 		if poked:
 			_open("…", SHOW)
@@ -454,8 +458,23 @@ func _nudge(poked: bool) -> void:
 			state.nudges = int(state.nudges) + 1
 
 
+# 길이를 넘겨 온 말을 같은 뜻·말투로 줄여 다시 쓰게 한다(한 번만). 그래도 길면 그대로 쓴다.
+func _fit(text: String, limit: int, done: Callable) -> void:
+	text = text.strip_edges().replace("\n", " ")
+	if text.length() <= limit:
+		done.call(text)
+		return
+	print("말이 길어서(%d자) 줄여 다시 씀" % text.length())
+	var prompt := "다음 말을 같은 뜻과 말투(반말)로 %d자 이내(띄어쓰기 포함), 한두 문장으로 줄여 다시 써라. 질문이 있으면 질문은 남겨라. 줄인 말만 출력해라.\n\n%s" % [limit, text]
+	var again := func(short: String, _code: int):
+		short = short.strip_edges().replace("\n", " ")
+		done.call(short if not short.is_empty() and short.length() < text.length() else text)
+	if not _call("너는 말을 짧게 다듬는 도우미다.", prompt, 0, again):
+		done.call(text)
+
+
 func _reply(text: String) -> void:
-	var prompt := "최근 대화:\n%s사용자: %s\n(사용자의 말에 대답해라. 대화가 이어지도록, 어울리면 끝에 질문 하나를 붙여라.)" % [_recent(), text]
+	var prompt := "최근 대화:\n%s사용자: %s\n(사용자의 말에 대답해라. 대화가 이어지도록, 어울리면 끝에 질문 하나를 붙여라. 한두 문장 %d자 이내.)" % [_recent(), text, REPLY_MAX_CHARS]
 	_today()
 	if int(state.calls) >= DAY_CALLS:
 		say("오늘은 말을 너무 많이 했어. 내일 또 얘기하자.")
@@ -466,15 +485,16 @@ func _reply(text: String) -> void:
 		if answer.is_empty():
 			say("지금은 대답을 못 하겠어. (%d)" % code)
 			return
-		if state.turns.size() > 0:
-			state.turns[-1].erase("n")   # 사용자가 답했으니 직전 말은 대화로 남긴다
-		_push("u", text)
-		_push("m", answer)
-		state.since_memo = int(state.since_memo) + 1
-		_save()
-		say(answer)
-		if int(state.since_memo) >= MEMO_EVERY:
-			_memo.call_deferred()
+		_fit(answer, REPLY_MAX_CHARS, func(a: String):
+			if state.turns.size() > 0:
+				state.turns[-1].erase("n")   # 사용자가 답했으니 직전 말은 대화로 남긴다
+			_push("u", text)
+			_push("m", a)
+			state.since_memo = int(state.since_memo) + 1
+			_save()
+			say(a)
+			if int(state.since_memo) >= MEMO_EVERY:
+				_memo.call_deferred())
 	if not _call(_system(), prompt, 0, done):
 		say("지금은 대답을 못 하겠어.")
 

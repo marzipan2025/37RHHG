@@ -97,6 +97,7 @@ const TOOLS := [
 			"message": {"type": "string", "description": "그때 할 말(반말, 짧게)"}},
 			"required": ["minutes", "message"]}},
 ]
+var last_err := ""             # 방금 실패의 까닭: credit(크레딧 바닥) | key(키 틀림) | busy(붐빔) | ""
 var last_tools: Array = []     # 방금 받은 응답의 tool_use 들
 var acts := {}                 # 도우미에 보낸 동작 id → {"say": Claude 가 쓴 한마디}
 var act_id := 0
@@ -495,6 +496,7 @@ func _on_done(result: int, code: int, _headers: PackedStringArray, body: PackedB
 	busy = false
 	var text := ""
 	last_tools = []
+	last_err = ""
 	if result == HTTPRequest.RESULT_SUCCESS and code == 200:
 		var d = JSON.parse_string(body.get_string_from_utf8())
 		if d is Dictionary:
@@ -509,6 +511,13 @@ func _on_done(result: int, code: int, _headers: PackedStringArray, body: PackedB
 						last_tools.append(c)
 	else:
 		print("claude 실패 result ", result, " code ", code, " ", body.get_string_from_utf8().left(200))
+		var msg := body.get_string_from_utf8().to_lower()
+		if msg.contains("credit balance") or msg.contains("billing"):
+			last_err = "credit"
+		elif code == 401 or code == 403:
+			last_err = "key"
+		elif code == 429 or code == 529 or code >= 500:
+			last_err = "busy"
 	var cb := pending
 	pending = Callable()
 	if cb.is_valid():
@@ -532,7 +541,12 @@ func _nudge(poked: bool) -> void:
 	var done := func(text: String, _code: int):
 		if text.is_empty():
 			if waiting:
-				say("지금은 말이 안 나와. (%d)" % _code)
+				say(_fail_line(_code))
+			elif last_err == "credit" and state.get("credit_told", "") != state.day:
+				# 혼자 말 걸다 크레딧이 바닥난 걸 알면 하루 한 번은 알려 준다.
+				state.credit_told = state.day
+				_save()
+				say(_fail_line(_code), NUDGE_SHOW)
 			return
 		if mode != HIDDEN and not waiting:
 			return
@@ -582,7 +596,7 @@ func _reply(text: String) -> void:
 			_run(last_tools[0], answer.strip_edges().replace("\n", " "))
 			return
 		if answer.is_empty():
-			say("지금은 대답을 못 하겠어. (%d)" % code)
+			say(_fail_line(code))
 			return
 		_fit(answer, REPLY_MAX_CHARS, func(a: String):
 			if state.turns.size() > 0:
@@ -673,3 +687,15 @@ func _timer_step() -> void:
 			_save()
 			say(msg, NUDGE_SHOW)
 			return
+
+
+# API 가 실패했을 때 캐릭터가 할 말. 크레딧·키는 사용자가 손써야 해서 분명히 말한다.
+func _fail_line(code: int) -> String:
+	match last_err:
+		"credit":
+			return "Claude 크레딧이 다 떨어졌어. 콘솔에서 충전해 줘."
+		"key":
+			return "Claude 키가 안 맞아. 메뉴에서 키를 다시 넣어 줘."
+		"busy":
+			return "Claude 쪽이 지금 붐벼. 조금 있다 다시 말해 줘."
+	return "지금은 대답을 못 하겠어. (%d)" % code

@@ -782,7 +782,7 @@ func _focus() -> void:
 func _setup_menu() -> void:
 	var menu := NativeMenu.create_menu()
 	popup_menu = menu
-	# 메뉴바에는 드물게 쓰는 것만 둔다. 나머지는 캐릭터를 우클릭하면 옆에 뜨는 그림 버튼으로.
+	# 메뉴바에는 드물게 쓰는 것만 둔다. 나머지는 캐릭터를 클릭하면 옆에 뜨는 그림 버튼으로.
 	NativeMenu.add_item(menu, "화면 아래 가운데로", func(_tag): _reset_position())
 	NativeMenu.add_item(menu, "Claude 키 넣기…", func(_tag): talk.ask_key())
 	NativeMenu.add_separator(menu)
@@ -801,7 +801,7 @@ func _tint_step(dt: float) -> void:
 	face_mat.set_shader_parameter("tint", smoothstep(0.0, 1.0, tint_now))
 
 
-# 캐릭터를 우클릭하면 옆에 그림 버튼 메뉴가 뜬다(말 도우미가 그린다). 토글 버튼은 지금 상태가 아닌 쪽을 보여 준다:
+# 캐릭터를 클릭하면 옆에 그림 버튼 메뉴가 뜬다(말 도우미가 그린다). 토글 버튼은 지금 상태가 아닌 쪽을 보여 준다:
 # 혼자 돌아다니는 중이면 Control(키보드 조작으로), 아니면 Walk!. Sonnet 이면 Haiku, 아니면 Sonnet.
 # What? 은 방금 한 말 다시 보기, Hey! 는 말 걸기.
 func _show_menu() -> void:
@@ -1175,18 +1175,22 @@ func _input(event: InputEvent) -> void:
 			last_axis = 1
 		if event.physical_keycode == KEY_SPACE and jump_u < 0.0:
 			_start_jump(false)
-	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
-		# 우클릭: 옆에 그림 버튼 메뉴를 띄우거나 닫는다.
-		if talk.menu_open:
-			talk.menu_hide()
-		else:
-			_show_menu()
 	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
-		if event.pressed and talk.menu_open:
-			talk.menu_hide()
-		if event.pressed and event.double_click:
-			# 캐릭터를 더블클릭하면 바로 한마디 한다.
-			talk.poke()
+		# 클릭(끌지 않고 뗌): 옆에 그림 버튼 메뉴를 띄우거나 닫는다. 더블클릭과 헷갈리지 않게
+		# 뗀 뒤 잠깐(CLICK_WAIT) 기다렸다가 띄운다. 더블클릭이면 메뉴 대신 바로 한마디 한다.
+		if event.pressed:
+			click_was_open = talk.menu_open
+			if talk.menu_open:
+				talk.menu_hide()
+			click_t = -1.0
+			if event.double_click:
+				click_double = true
+				talk.poke()
+		elif dragging:
+			var moved := (Vector2(DisplayServer.mouse_get_position()) - drag_mouse).length()
+			if moved < CLICK_SLOP * screen_scale and not click_was_open and not click_double:
+				click_t = CLICK_WAIT
+			click_double = false
 		dragging = event.pressed
 		drag_mouse = Vector2(DisplayServer.mouse_get_position())
 		drag_win = win_pos
@@ -1197,6 +1201,21 @@ func _input(event: InputEvent) -> void:
 			# 창이 움직이면 창 안 좌표가 흔들리므로 화면 좌표로 계산한다.
 			win_pos = drag_win + Vector2(DisplayServer.mouse_get_position()) - drag_mouse
 			_place()
+
+
+const CLICK_WAIT := 0.28       # 클릭 뒤 메뉴를 띄우기 전 기다리는 시간(더블클릭인지 보려고)
+const CLICK_SLOP := 4.0        # 이만큼(pt) 넘게 끌었으면 클릭이 아니다
+var click_t := -1.0
+var click_was_open := false
+var click_double := false
+
+
+func _click_step(dt: float) -> void:
+	if click_t < 0.0:
+		return
+	click_t -= dt
+	if click_t < 0.0 and not dragging and not talk.menu_open:
+		_show_menu()
 
 
 func _key(a: Key, b: Key) -> float:
@@ -1354,6 +1373,7 @@ func _process(dt: float) -> void:
 	talk.anchor = (_feet() - Vector2(0, lift + (CHAR_H + 4.0) * px_scale)) / screen_scale + origin
 	talk.feet_y = _feet().y / screen_scale + origin.y
 	_hover_step()
+	_click_step(dt)
 	_tint_step(dt)
 	talk.step(dt)
 	_face_step(dt, 2 if jump_u >= 0.0 else (1 if run > 0.5 else 0), w < 0.15)

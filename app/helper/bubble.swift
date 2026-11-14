@@ -11,6 +11,7 @@
 //   {"op":"hidemenu"}
 //   {"op":"scan","px":..,"py":..,"cell":16}         그 점이 있는 화면을 찍어 칸마다 복잡도를 잰다(혼자 돌아다니기용)
 //   {"op":"step","px":..,"py":..,"m":[a,b,c,d]}     발자국 하나: 단위 원을 (a,b)·(c,d) 열로 옮긴 타원(pt, y 아래 +), 2초에 걸쳐 사라짐
+//   {"op":"speak","text":"…"} {"op":"voiceoff"}     캐릭터의 말을 Supertonic 3 로 읽기 / 끄기(엔진도 내린다)
 //   {"op":"ctx"}                                    맥과 주변 정보(일정·할 일·날씨·지금 쓰는 앱·음악 등)를 모아 돌려준다
 //   {"op":"act","id":n,"name":"music|volume|open_app|open_url|add_reminder|add_event","input":{…}}  다른 앱 움직이기
 // 표준 출력(한 줄씩): "over"/"out"(마우스가 글씨 위에 들어옴/나감) | "click"(글씨를 누름) | "typing"(입력칸에 처음 글을 침)
@@ -25,6 +26,7 @@ import ScreenCaptureKit
 import EventKit
 import CoreLocation
 import IOKit.ps
+import AVFoundation
 
 let textMaxW: CGFloat = 320    // 글 최대 폭(상자 안쪽)
 let fontSize: CGFloat = 14     // 입력칸과 같은 크기·글꼴, 굵기만 조금 더
@@ -597,6 +599,8 @@ final class Talk: NSObject, NSTextFieldDelegate {
         case "menu": showMenu(dir: j["dir"] as? String ?? "", items: j["items"] as? [String] ?? [])
         case "hidemenu": hideMenu()
         case "ctx": macContext.gather()
+        case "speak": voice.speak(j["text"] as? String ?? "")
+        case "voiceoff": voice.off()
         case "step":
             let m = (j["m"] as? [Double] ?? [1, 0, 0, 1]).map { CGFloat($0) }
             if m.count == 4 { prints.stamp(at: CGPoint(x: j["px"] as? Double ?? 0, y: j["py"] as? Double ?? 0), m: m) }
@@ -605,6 +609,109 @@ final class Talk: NSObject, NSTextFieldDelegate {
         case "scan": scan(at: CGPoint(x: j["px"] as? Double ?? 0, y: j["py"] as? Double ?? 0), cell: CGFloat(j["cell"] as? Double ?? 16))
         default: break
         }
+    }
+}
+
+// ---------------------------------------------------------------- 목소리
+// Supertonic 3(로컬 ONNX)을 22SUTO 의 파이썬 환경으로 띄운 tts_daemon.py 가 한 줄씩 wav 로 만들고,
+// 여기서 음을 높여(AVAudioUnitTimePitch, 빠르기는 그대로) 재생한다. 22SUTO 가 없는 맥에서는 조용히 넘어간다.
+// 처음 켤 때 모델을 올리고(0.5초, 메모리 ~400MB), 끄면 내린다. 새 말이 오면 읽던 것은 끊고 마지막 것만 읽는다.
+let voicePitch: Float = 450      // cent(100 = 반음). F1 을 여자아이처럼(300 은 낮았다).
+
+final class Voice {
+    var proc: Process?
+    var input: FileHandle?
+    var dead = false              // 엔진이 없다(22SUTO 없음)
+    var nextId = 0
+    var latest = 0
+    var buf = Data()
+    let engine = AVAudioEngine()
+    let player = AVAudioPlayerNode()
+    let pitch = AVAudioUnitTimePitch()
+    var wired: AVAudioFormat?
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("rhhg-voice")
+
+    init() {
+        pitch.pitch = voicePitch
+        engine.attach(player)
+        engine.attach(pitch)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+
+    func script() -> String? {
+        if let p = Bundle.main.path(forResource: "tts_daemon", ofType: "py") { return p }
+        let dev = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+            .appendingPathComponent("tts_daemon.py").path
+        return FileManager.default.fileExists(atPath: dev) ? dev : nil
+    }
+
+    func start() -> Bool {
+        if proc?.isRunning == true { return true }
+        let py = NSHomeDirectory() + "/Library/Application Support/22SUTO/venv/bin/python"
+        guard !dead, FileManager.default.isExecutableFile(atPath: py), let sc = script() else { dead = true; return false }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: py)
+        p.arguments = ["-I", sc]
+        let i = Pipe(), o = Pipe()
+        p.standardInput = i
+        p.standardOutput = o
+        p.standardError = FileHandle.nullDevice
+        o.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let d = h.availableData
+            DispatchQueue.main.async { self?.read(d) }
+        }
+        do { try p.run() } catch { dead = true; return false }
+        proc = p
+        input = i.fileHandleForWriting
+        return true
+    }
+
+    func read(_ d: Data) {
+        buf.append(d)
+        while let nl = buf.firstIndex(of: 10) {
+            let line = String(decoding: buf[buf.startIndex..<nl], as: UTF8.self)
+            buf.removeSubrange(buf.startIndex...nl)
+            let f = line.split(separator: " ")
+            if line == "noengine" { dead = true; off(); return }
+            guard f.count == 2, let id = Int(f[1]) else { continue }
+            let url = file(id)
+            if f[0] == "ok" && id == latest { play(url) } else { try? FileManager.default.removeItem(at: url) }
+        }
+    }
+
+    func file(_ id: Int) -> URL { dir.appendingPathComponent("\(id).wav") }
+
+    func speak(_ text: String) {
+        guard start(), let input else { return }
+        nextId += 1
+        latest = nextId
+        player.stop()
+        let j: [String: Any] = ["id": nextId, "text": text, "out": file(nextId).path]
+        guard var d = try? JSONSerialization.data(withJSONObject: j) else { return }
+        d.append(10)
+        input.write(d)
+    }
+
+    func play(_ url: URL) {
+        guard let f = try? AVAudioFile(forReading: url) else { return }
+        if wired != f.processingFormat {
+            engine.connect(player, to: pitch, format: f.processingFormat)
+            engine.connect(pitch, to: engine.mainMixerNode, format: f.processingFormat)
+            wired = f.processingFormat
+        }
+        if !engine.isRunning { try? engine.start() }
+        player.stop()
+        player.scheduleFile(f, at: nil) { try? FileManager.default.removeItem(at: url) }
+        player.play()
+    }
+
+    func off() {
+        player.stop()
+        proc?.terminate()
+        proc = nil
+        input = nil
+        latest = -1
+        if engine.isRunning { engine.stop() }
     }
 }
 
@@ -1297,6 +1404,7 @@ app.setActivationPolicy(.accessory)
 let talk = Talk()
 let macContext = MacContext()
 let prints = Prints()
+let voice = Voice()
 Thread.detachNewThread {
     while let line = readLine() {
         guard let d = line.data(using: .utf8),

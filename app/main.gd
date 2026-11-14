@@ -838,7 +838,8 @@ func _tint_step(dt: float) -> void:
 # 혼자 돌아다니는 중이면 Control(키보드 조작으로), 아니면 Walk!. Sonnet 이면 Haiku, 아니면 Sonnet.
 # What? 은 방금 한 말 다시 보기, Hey! 는 말 걸기.
 func _show_menu() -> void:
-	talk.menu_show(["ctrl" if wander else "walk", "haiku" if talk.sonnet() else "sonnet", "what", "hey"])
+	talk.menu_show(["ctrl" if wander else "walk", "haiku" if talk.sonnet() else "sonnet", "what", "hey",
+		"mute" if talk.voice() else "voice"])
 
 
 func _on_menu(id: String) -> void:
@@ -854,6 +855,10 @@ func _on_menu(id: String) -> void:
 			talk.set_sonnet(true)
 		"haiku":
 			talk.set_sonnet(false)
+		"voice":
+			talk.set_voice(true)
+		"mute":
+			talk.set_voice(false)
 		"what":
 			talk.replay()
 		"hey":

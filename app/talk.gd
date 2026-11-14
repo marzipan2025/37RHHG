@@ -313,6 +313,25 @@ func set_sonnet(on: bool) -> void:
 	_save()
 
 
+# 목소리: 메뉴 맨 아래 한 자리 토글로 Voice ↔ Mute(기본은 소리 없음). 켜면 도우미가 Supertonic 3(로컬)으로 읽는다.
+func voice() -> bool:
+	return bool(state.get("voice", false))
+
+
+func set_voice(on: bool) -> void:
+	state.voice = on
+	_save()
+	if on:
+		speak("이제 내 목소리도 들려줄게!")
+	else:
+		_send({"op": "voiceoff"})
+
+
+func speak(text: String) -> void:
+	if voice() and not text.is_empty() and text != "…":
+		_send({"op": "speak", "text": text})
+
+
 # 캐릭터가 마지막으로 한 말을 다시 띄운다(놓쳤을 때). 그 안에 글씨를 누르면 답장할 수 있다.
 func replay() -> void:
 	if mode == REPLY or mode == KEY or waiting:
@@ -320,6 +339,7 @@ func replay() -> void:
 	for i in range(state.turns.size() - 1, -1, -1):
 		if state.turns[i].r == "m":
 			_open(String(state.turns[i].t), SHOW, NUDGE_SHOW)
+			speak(String(state.turns[i].t))
 			return
 	_open("아직 내가 한 말이 없어.", SHOW, SHOW_TIME)
 
@@ -364,6 +384,7 @@ func say(text: String, seconds := 0.0) -> void:
 	waiting = false
 	spoke.emit()
 	_open(text, SHOW, seconds if seconds > 0.0 else SHOW_TIME)
+	speak(text)
 
 
 # ---------------------------------------------------------------- 매 프레임
@@ -657,6 +678,7 @@ func _run(tool: Dictionary, answer: String) -> void:
 		spoke.emit()
 		waiting = false
 		_open(what, REPLY)
+		speak(what)
 		return
 	if name == "timer":
 		var mins := float(input.get("minutes", 0))

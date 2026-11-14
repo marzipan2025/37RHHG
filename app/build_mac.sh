@@ -14,6 +14,8 @@ godot --headless --path . --export-release "macOS" "$OUT" 2>&1 | grep -E "ERROR"
 /usr/libexec/PlistBuddy -c 'Print :NSCalendarsFullAccessUsageDescription' "$OUT/Contents/Info.plist" >/dev/null || { echo "권한 문구 누락"; exit 1; }
 # 말 도우미를 실행 파일 옆에 둔다.
 cp helper/bubble "$OUT/Contents/MacOS/bubble"
+# 목소리(Supertonic 3) 만드는 스크립트. 도우미가 Resources 에서 찾는다.
+cp helper/tts_daemon.py "$OUT/Contents/Resources/tts_daemon.py"
 # 우클릭 메뉴의 버튼 그림(도우미가 파일로 읽는다).
 mkdir -p "$OUT/Contents/Resources/buttons"
 cp buttons/*.png "$OUT/Contents/Resources/buttons/"

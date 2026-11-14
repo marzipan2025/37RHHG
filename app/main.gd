@@ -39,6 +39,12 @@ var zoom_v := 0.0
 var sole := {}                 # "Left"/"Right" → {"off": 발목에서 발바닥 가운데까지 앞쪽 거리, "len", "wid"} (월드 단위)
 var last_phase := 0.0
 var was_air := false
+
+# 가만히 서 있을 때(숨쉬기·두리번거리기·눈 깜빡임뿐)는 프레임을 낮춰 CPU 를 아낀다. 움직이면 바로 60.
+const FPS_ACTIVE := 60
+const FPS_IDLE := 24
+const FPS_CALM := 0.6           # 이만큼(초) 조용해야 낮춘다
+var calm_t := 0.0
 var win_pos := Vector2.ZERO    # 창 왼쪽 위, 화면 픽셀
 var move_dir := Vector2.DOWN
 var last_axis := 0             # 마지막으로 누른 방향키 축(0 좌우, 1 위아래)
@@ -832,7 +838,8 @@ func _tint_step(dt: float) -> void:
 # 혼자 돌아다니는 중이면 Control(키보드 조작으로), 아니면 Walk!. Sonnet 이면 Haiku, 아니면 Sonnet.
 # What? 은 방금 한 말 다시 보기, Hey! 는 말 걸기.
 func _show_menu() -> void:
-	talk.menu_show(["ctrl" if wander else "walk", "haiku" if talk.sonnet() else "sonnet", "what", "hey"])
+	talk.menu_show(["ctrl" if wander else "walk", "haiku" if talk.sonnet() else "sonnet",
+		"mute" if talk.voice() else "voice", "what", "hey"])
 
 
 func _on_menu(id: String) -> void:
@@ -848,6 +855,10 @@ func _on_menu(id: String) -> void:
 			talk.set_sonnet(true)
 		"haiku":
 			talk.set_sonnet(false)
+		"voice":
+			talk.set_voice(true)
+		"mute":
+			talk.set_voice(false)
 		"what":
 			talk.replay()
 		"hey":
@@ -1406,6 +1417,7 @@ func _process(dt: float) -> void:
 	_face_step(dt, 2 if jump_u >= 0.0 else (1 if run > 0.5 else 0), w < 0.15)
 	_pose(w, run, phase, clock, j, leap)
 	_print_step(w)
+	_fps_step(dt, w)
 
 
 # ---------------------------------------------------------------- 인사
@@ -1823,3 +1835,12 @@ func _stamp(s: String) -> void:
 	var hw := float(sole[s].wid) * 0.5 * pt
 	# 단위 원 → 화면(pt, y 아래 +) 선형 변환의 두 열
 	talk.footprint(at, Vector2(u.x, u.y * PRINT_FLAT) * hl, Vector2(v.x, v.y * PRINT_FLAT_SIDE) * hw)
+
+
+func _fps_step(dt: float, w: float) -> void:
+	var active := w > 0.02 or anim_speed > 2.0 or jump_u >= 0.0 or dragging or zoom_v != 0.0 \
+		or zoom_k != 1.0 or greet_t >= 0.0 or absf(angle_difference(yaw, target_yaw)) > 0.01
+	calm_t = 0.0 if active else calm_t + dt
+	var want := FPS_IDLE if calm_t > FPS_CALM else FPS_ACTIVE
+	if Engine.max_fps != want:
+		Engine.max_fps = want

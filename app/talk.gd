@@ -180,6 +180,9 @@ func _open(text: String, m: int, seconds := 0.0) -> void:
 	if m == SHOW:
 		_send({"op": "hideinput"})
 	else:
+		# 입력칸이 뜨면 그림 버튼 메뉴는 닫는다.
+		if menu_open:
+			menu_hide()
 		_send({"op": "input", "mode": MODE_NAME[m]}.merged(at))
 
 

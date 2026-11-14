@@ -10,8 +10,8 @@ const URL := "https://api.anthropic.com/v1/messages"
 const API_VERSION := "2026-10-21"
 const EFFORT := "low"          # 짧은 잡담이라 생각은 조금만(비용·속도)
 const MAX_TOKENS := 2000       # 생각하는 몫까지 포함한 상한. 말 길이는 프롬프트로 정한다.
-const DAY_CALLS := 200         # 하루 API 호출 상한(먼저 말 걸기 + 답장 + 요약)
-const DAY_NUDGES := 6          # 하루에 먼저 말 거는 횟수
+const DAY_CALLS := 300         # 하루 API 호출 상한(먼저 말 걸기 + 답장 + 요약)
+const DAY_NUDGES := 20         # 하루에 먼저 말 거는 횟수
 const NUDGE_MIN := 25.0 * 60.0 # 먼저 말 거는 간격(초)
 const NUDGE_MAX := 60.0 * 60.0
 const KEEP_TURNS := 12         # API 에 같이 보내는 최근 말 수
@@ -350,6 +350,11 @@ func menu_show(items: Array) -> void:
 	_send({"op": "menu", "dir": dir, "items": items, "x": anchor.x, "y": anchor.y, "fy": feet_y})
 
 
+# 발자국 하나: 화면 pt 가운데 at, 단위 원을 화면으로 옮기는 두 열 ex·ey(pt, y 아래 +). 도우미가 그려서 2초에 걸쳐 지운다.
+func footprint(at: Vector2, ex: Vector2, ey: Vector2) -> void:
+	_send({"op": "step", "px": at.x, "py": at.y, "m": [ex.x, ex.y, ey.x, ey.y]})
+
+
 func menu_hide() -> void:
 	menu_open = false
 	_send({"op": "hidemenu"})
@@ -436,7 +441,7 @@ func _system() -> String:
 		+ "- 그건 속상했겠다. 그래도 거기까지 해낸 거 나는 대단하다고 생각해.\n"
 		+ "기억:\n%s\n지금: %d년 %d월 %d일 %s요일 %d시 %d분\n지금 맥과 주변:\n%s") % [
 		state.memo if not String(state.memo).is_empty() else "(아직 없음. 사용자가 어떤 사람인지, 요즘 무엇을 하는지부터 알아 가라.)",
-		now.year, now.month, now.day, days[now.weekday], now.hour, now.minute, mac if not mac.is_empty() else "(아직 모름)"]
+		now.year, now.month, now.day, days[now.weekday], now.hour, now.minute, _self_info() + (mac if not mac.is_empty() else "(아직 모름)")]
 
 
 # 그 말을 한 지 얼마나 됐는지. 며칠 만에 이어지는 대화인지 알 수 있게 한다.
@@ -699,3 +704,10 @@ func _fail_line(code: int) -> String:
 		"busy":
 			return "Claude 쪽이 지금 붐벼. 조금 있다 다시 말해 줘."
 	return "지금은 대답을 못 하겠어. (%d)" % code
+
+
+# 이 앱이 직접 아는 자기 상태(하루 호출 횟수 등). 사용자가 물으면 답할 수 있게 맥 정보 앞에 붙인다.
+func _self_info() -> String:
+	_today()
+	return ("너의 말 모델: %s\n오늘 Claude 호출: %d번 씀, 하루 상한 %d번(먼저 말 걸기·대답·기억 정리·말 줄이기 모두 한 번씩). 먼저 말 걸기는 오늘 %d/%d번.\n" % [
+		"Sonnet" if sonnet() else "Haiku", int(state.calls) + 1, DAY_CALLS, int(state.nudges), DAY_NUDGES])

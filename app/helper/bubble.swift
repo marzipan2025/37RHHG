@@ -10,6 +10,7 @@
 //   {"op":"menu","dir":"그림 폴더","items":["ctrl","sonnet","what","hey"], "x":..,"y":..,"fy":..}  캐릭터 옆 그림 버튼 메뉴
 //   {"op":"hidemenu"}
 //   {"op":"scan","px":..,"py":..,"cell":16}         그 점이 있는 화면을 찍어 칸마다 복잡도를 잰다(혼자 돌아다니기용)
+//   {"op":"step","px":..,"py":..,"m":[a,b,c,d]}     발자국 하나: 단위 원을 (a,b)·(c,d) 열로 옮긴 타원(pt, y 아래 +), 2초에 걸쳐 사라짐
 //   {"op":"ctx"}                                    맥과 주변 정보(일정·할 일·날씨·지금 쓰는 앱·음악 등)를 모아 돌려준다
 //   {"op":"act","id":n,"name":"music|volume|open_app|open_url|add_reminder|add_event","input":{…}}  다른 앱 움직이기
 // 표준 출력(한 줄씩): "over"/"out"(마우스가 글씨 위에 들어옴/나감) | "click"(글씨를 누름) | "typing"(입력칸에 처음 글을 침)
@@ -596,11 +597,63 @@ final class Talk: NSObject, NSTextFieldDelegate {
         case "menu": showMenu(dir: j["dir"] as? String ?? "", items: j["items"] as? [String] ?? [])
         case "hidemenu": hideMenu()
         case "ctx": macContext.gather()
+        case "step":
+            let m = (j["m"] as? [Double] ?? [1, 0, 0, 1]).map { CGFloat($0) }
+            if m.count == 4 { prints.stamp(at: CGPoint(x: j["px"] as? Double ?? 0, y: j["py"] as? Double ?? 0), m: m) }
         case "act": macContext.act(id: j["id"] as? Int ?? 0, name: j["name"] as? String ?? "",
                                    input: j["input"] as? [String: Any] ?? [:])
         case "scan": scan(at: CGPoint(x: j["px"] as? Double ?? 0, y: j["py"] as? Double ?? 0), cell: CGFloat(j["cell"] as? Double ?? 16))
         default: break
         }
+    }
+}
+
+// ---------------------------------------------------------------- 발자국
+// 화면마다 클릭이 통과하는 투명 패널 하나를 깔고, 발이 닿을 때마다 타원을 찍어 천천히(printFade 초) 지운다.
+// 캐릭터 창(Godot, floating) 바로 아래 높이라 일반 앱 창보다는 위, 캐릭터보다는 아래.
+let printFade: CFTimeInterval = 2.0
+
+final class Prints {
+    var panels: [NSScreen: NSPanel] = [:]
+
+    func panel(for at: NSPoint) -> NSPanel? {
+        guard let sc = NSScreen.screens.first(where: { $0.frame.contains(at) }) else { return nil }
+        if let p = panels[sc], p.frame == sc.frame { return p }
+        panels[sc]?.orderOut(nil)
+        let p = makePanel(NSPanel.self, shadow: false)
+        p.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue - 1)
+        p.ignoresMouseEvents = true
+        p.setFrame(sc.frame, display: false)
+        let v = NSView(frame: NSRect(origin: .zero, size: sc.frame.size))
+        v.wantsLayer = true
+        p.contentView = v
+        p.orderFrontRegardless()
+        panels[sc] = p
+        return p
+    }
+
+    // at: 화면 pt(왼쪽 위 원점), m: 단위 원을 화면으로 옮기는 두 열 (m0,m1)·(m2,m3), y 아래가 +
+    func stamp(at: CGPoint, m: [CGFloat]) {
+        let c = talk.cocoa(at)
+        guard hypot(m[0], m[1]) > 0.5, let p = panel(for: c), let root = p.contentView?.layer else { return }
+        let l = CAShapeLayer()
+        l.path = CGPath(ellipseIn: CGRect(x: -1, y: -1, width: 2, height: 2), transform: nil)
+        l.fillColor = NSColor(white: 0.0, alpha: 0.11).cgColor
+        l.position = CGPoint(x: c.x - p.frame.minX, y: c.y - p.frame.minY)
+        // Cocoa 는 y 가 위로 + 라 y 성분을 뒤집는다.
+        l.setAffineTransform(CGAffineTransform(a: m[0], b: -m[1], c: m[2], d: -m[3], tx: 0, ty: 0))
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        root.addSublayer(l)
+        CATransaction.commit()
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 1.0
+        fade.toValue = 0.0
+        fade.duration = printFade
+        fade.timingFunction = CAMediaTimingFunction(name: .easeIn)
+        l.opacity = 0
+        l.add(fade, forKey: "fade")
+        DispatchQueue.main.asyncAfter(deadline: .now() + printFade + 0.1) { l.removeFromSuperlayer() }
     }
 }
 
@@ -1243,6 +1296,7 @@ let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let talk = Talk()
 let macContext = MacContext()
+let prints = Prints()
 Thread.detachNewThread {
     while let line = readLine() {
         guard let d = line.data(using: .utf8),

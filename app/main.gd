@@ -28,7 +28,17 @@ const HIT_RECT := Rect2(46, 20, 88, 178)
 var px_scale := 1.0            # 창 크기용 배율 = screen_scale * zoom
 var screen_scale := 1.0        # 화면 자체 배율(pt → 화면 픽셀)
 const BASE_ZOOM := 160.0 / CHAR_H   # 기본 캐릭터 키 160pt
-var zoom := BASE_ZOOM           # 점검용: z 를 누르고 있는 동안만 2배. 나중에 지울 것.
+var zoom := BASE_ZOOM           # 이스터에그: z 를 누르고 있는 동안만 2배(두 발을 기준으로 위로 커진다)
+const ZOOM_MAX := 2.0
+const ZOOM_FREQ := 16.0         # 스프링 고유 진동수(rad/s). 클수록 빠르다.
+const ZOOM_DAMP := 0.55         # 감쇠비. 1보다 작아서 살짝 넘쳤다가 자리 잡는다.
+var zoom_k := 1.0              # 기본 대비 배율(스프링)
+var zoom_v := 0.0
+
+# 발자국: 발이 땅에 닿을 때마다 그 자리에 발바닥 크기 타원을 남기고 2초에 걸쳐 지운다(말 도우미가 그린다).
+var sole := {}                 # "Left"/"Right" → {"off": 발목에서 발바닥 가운데까지 앞쪽 거리, "len", "wid"} (월드 단위)
+var last_phase := 0.0
+var was_air := false
 var win_pos := Vector2.ZERO    # 창 왼쪽 위, 화면 픽셀
 var move_dir := Vector2.DOWN
 var last_axis := 0             # 마지막으로 누른 방향키 축(0 좌우, 1 위아래)
@@ -240,6 +250,7 @@ func _build_scene() -> void:
 	body_mi.mesh = body_mesh
 	_matte(inst)   # 재질은 MeshInstance 쪽 덮어쓰기라 메시를 바꿔 껴도 그대로다
 	_cache_bones()
+	_measure_soles()
 
 	shadow = MeshInstance3D.new()
 	var quad := QuadMesh.new()
@@ -755,7 +766,23 @@ func _place() -> void:
 		cam.position = cam_base - cam_lift_dir * (lift / px_scale * k)
 
 
-# 점검용(나중에 지울 것): z 를 누르고 있는 동안만 캐릭터를 2배로. 발 위치는 그대로 둔다.
+# z 를 누르면 두 발을 기준으로 위로 커지고, 떼면 줄어든다. 스프링이라 살짝 넘쳤다가 자리 잡는다.
+func _zoom_step(dt: float) -> void:
+	var target := ZOOM_MAX if Input.is_physical_key_pressed(KEY_Z) and not talk.typing else 1.0
+	if zoom_k == target and zoom_v == 0.0:
+		return
+	var n := 4
+	var h := minf(dt, 0.05) / n
+	for i in n:
+		zoom_v += (ZOOM_FREQ * ZOOM_FREQ * (target - zoom_k) - 2.0 * ZOOM_DAMP * ZOOM_FREQ * zoom_v) * h
+		zoom_k += zoom_v * h
+	if absf(target - zoom_k) < 0.002 and absf(zoom_v) < 0.02:
+		zoom_k = target
+		zoom_v = 0.0
+	_set_zoom(BASE_ZOOM * maxf(zoom_k, 0.5))
+
+
+# 창 크기를 바꾼다. 발 위치(두 발 가운데, 창 아래쪽)는 그대로 두므로 위로 커진다.
 func _set_zoom(z: float) -> void:
 	if z == zoom:
 		return
@@ -1256,7 +1283,7 @@ func _process(dt: float) -> void:
 		dragging = false
 	if demo:
 		_demo_step()
-	_set_zoom(BASE_ZOOM * (2.0 if Input.is_physical_key_pressed(KEY_Z) and not talk.typing else 1.0))
+	_zoom_step(dt)
 	var leaping := jump_u >= 0.0 and jump_long
 	var d := Vector2(_key(KEY_RIGHT, KEY_D) - _key(KEY_LEFT, KEY_A),
 		_key(KEY_DOWN, KEY_S) - _key(KEY_UP, KEY_W))
@@ -1378,6 +1405,7 @@ func _process(dt: float) -> void:
 	talk.step(dt)
 	_face_step(dt, 2 if jump_u >= 0.0 else (1 if run > 0.5 else 0), w < 0.15)
 	_pose(w, run, phase, clock, j, leap)
+	_print_step(w)
 
 
 # ---------------------------------------------------------------- 인사
@@ -1716,3 +1744,82 @@ func _take_snapshots() -> void:
 		await RenderingServer.frame_post_draw
 		get_viewport().get_texture().get_image().save_png("res://snap/body_%s.png" % l[0])
 	get_tree().quit()
+
+
+# ---------------------------------------------------------------- 발자국
+
+# 신발 크기를 메시에서 잰다(쉬는 자세, 발목 높이 아래 꼭짓점). 모델 공간: +z 가 앞(정면), +x 가 캐릭터의 왼쪽.
+func _measure_soles() -> void:
+	# 꼭짓점은 스킨 바인드 공간(미터)이고 뼈대는 센티미터라, 쉬는 자세의 스키닝 변환(뼈 rest × 바인드)으로 옮긴다.
+	var sk := model.global_transform.affine_inverse() * skel.global_transform
+	var skin := body_mi.skin
+	var fi: int = bones["LeftFoot"].i
+	var bind := Transform3D.IDENTITY
+	for bi in skin.get_bind_count():
+		if skin.get_bind_bone(bi) == fi or skin.get_bind_name(bi) == "LeftFoot":
+			bind = skin.get_bind_pose(bi)
+	var to_model := sk * skel.get_bone_global_rest(fi) * bind
+	var ank := {}
+	for s in ["Left", "Right"]:
+		ank[s] = sk * skel.get_bone_global_rest(bones[s + "Foot"].i).origin
+	var box := {"Left": AABB(), "Right": AABB()}
+	var seen := {"Left": false, "Right": false}
+	for si in body_mesh.get_surface_count():
+		var verts: PackedVector3Array = body_mesh.surface_get_arrays(si)[Mesh.ARRAY_VERTEX]
+		for v0 in verts:
+			var v := to_model * v0
+			for s in ["Left", "Right"]:
+				var a: Vector3 = ank[s]
+				if v.y < a.y * 0.6 and absf(v.x - a.x) < 0.12 and absf(v.z - a.z) < 0.25:
+					if seen[s]:
+						box[s] = box[s].expand(v)
+					else:
+						box[s] = AABB(v, Vector3.ZERO)
+						seen[s] = true
+	for s in ["Left", "Right"]:
+		var b: AABB = box[s]
+		var a: Vector3 = ank[s]
+		sole[s] = {"off": b.get_center().z - a.z, "len": b.size.z, "wid": b.size.x}
+		print("발바닥 ", s, " 길이 %.3f 폭 %.3f 앞으로 %.3f (pt %.1f×%.1f)" % [b.size.z, b.size.x, b.get_center().z - a.z, b.size.z / k, b.size.x / k])
+
+
+# 걸음 주기에서 발이 가장 낮게 땅을 딛는 때(왼발 phase 0, 오른발 0.5, 로그로 잰 값)에 그 발 자리에 하나 찍는다.
+# 뛰었다 내려앉으면 두 발 다.
+func _print_step(w: float) -> void:
+	if sole.is_empty() or dragging:
+		last_phase = phase
+		return
+	var air := jump_u >= 0.0
+	if was_air and not air:
+		_stamp("Left")
+		_stamp("Right")
+	was_air = air
+	if not air and w > 0.3 and anim_speed > 20.0:
+		if phase < last_phase:
+			_stamp("Left")
+		elif last_phase < 0.5 and phase >= 0.5:
+			_stamp("Right")
+	last_phase = phase
+
+
+# 발바닥 타원을 땅에 놓고 카메라가 보는 대로(내려다보는 각 CAM_PITCH) 화면에 옮긴다. 자리는 정확히(깊이 × sin),
+# 모양은 그대로 옮기면 너무 납작해서(sin 10° ≈ 0.17) 깊이 쪽을 PRINT_FLAT 만큼만 줄인다.
+const PRINT_FLAT := 0.4          # 발 길이 쪽(위아래로 걸을 때 높이가 된다)
+const PRINT_FLAT_SIDE := 0.3     # 발 폭 쪽(좌우로 걸을 때 높이가 된다. 0.4 는 두껍고 0.2 는 너무 납작했다)
+
+
+func _stamp(s: String) -> void:
+	var a := skel.global_transform * skel.get_bone_global_pose(bones[s + "Foot"].i).origin - model.global_position
+	# 발끝 방향(월드 xz). 옆으로 걸을 때 몸은 70도만 돌아 있지만(yaw) 바닥에 남는 발자국은 걷는 방향(수평)으로 눕힌다.
+	var u := Vector2(move_dir.x, move_dir.y).normalized() if move_dir != Vector2.ZERO else Vector2(sin(yaw), cos(yaw))
+	var v := Vector2(u.y, -u.x)
+	var c := Vector2(a.x, a.z) + u * float(sole[s].off)
+	var pt := zoom / k                          # 월드 단위 → 화면 pt
+	var sp := sin(deg_to_rad(CAM_PITCH))
+	# 메뉴바 근처에서 창을 내리고 캐릭터를 올려 그려도(lift) 발은 _feet() 그대로다.
+	var ground := _feet() / screen_scale + origin
+	var at := ground + Vector2(c.x, c.y * sp) * pt
+	var hl := float(sole[s].len) * 0.5 * pt
+	var hw := float(sole[s].wid) * 0.5 * pt
+	# 단위 원 → 화면(pt, y 아래 +) 선형 변환의 두 열
+	talk.footprint(at, Vector2(u.x, u.y * PRINT_FLAT) * hl, Vector2(v.x, v.y * PRINT_FLAT_SIDE) * hw)

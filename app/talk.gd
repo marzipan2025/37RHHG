@@ -169,7 +169,8 @@ func _open(text: String, m: int, seconds := 0.0) -> void:
 	shown = text
 	typing = m != SHOW
 	composing = false
-	show_left = seconds
+	# 보여 주기만 하는 말에 시간이 안 정해져 있으면(0) 영영 안 닫히므로 기본 시간을 준다. "…" 은 대답이 오면 바뀐다.
+	show_left = seconds if seconds > 0.0 or m != SHOW or text == "…" else SHOW_TIME
 	sent_anchor = anchor
 	var at := {"x": anchor.x, "y": anchor.y, "fy": feet_y}
 	# 말은 상자 없이 머리 위 글씨로, 입력칸은 발치에.

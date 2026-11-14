@@ -244,8 +244,8 @@ final class TextView: NSView {
         addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
                                        owner: self, userInfo: nil))
     }
-    override func mouseEntered(with event: NSEvent) { emit("over") }
-    override func mouseExited(with event: NSEvent) { emit("out") }
+    // over/out 은 Talk.checkHover 가 실제 마우스 위치로 판단한다(창이 움직이거나 숨으면 추적 영역 이벤트가 안 와서
+    // "over" 에 갇혀 말풍선이 안 닫히던 문제).
     override func mouseDown(with event: NSEvent) { emit("click") }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
@@ -386,8 +386,20 @@ final class Talk: NSObject, NSTextFieldDelegate {
     var menuIdle: Timer?
     var menuMonitor: Any?
 
+    var textHover = false
+
+    // 말풍선 위에 마우스가 있는지 0.2초마다 실제 위치로 본다. 바뀔 때만 over/out 을 낸다.
+    @objc func checkHover() {
+        let inside = textPanel.isVisible && textPanel.frame.insetBy(dx: boxPad, dy: boxPad).contains(NSEvent.mouseLocation)
+        if inside != textHover {
+            textHover = inside
+            emit(inside ? "over" : "out")
+        }
+    }
+
     override init() {
         super.init()
+        Timer.scheduledTimer(timeInterval: 0.2, target: self, selector: #selector(checkHover), userInfo: nil, repeats: true)
         textPanel.contentView = textBox
         inputPanel.contentView = inputCandy
         inputPanel.onKey = { [weak self] in self?.startTyping() }

@@ -10,6 +10,8 @@ helper/build_helper.sh
 godot --headless --path . --import >/dev/null 2>&1 || true
 godot --headless --path . --export-release "macOS" "$OUT" 2>&1 | grep -E "ERROR" && exit 1 || true
 [ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$OUT/Contents/Info.plist")" = "true" ] || { echo "LSUIElement 누락"; exit 1; }
+# 캘린더·미리 알림·위치·자동화 권한 문구. 없으면 도우미가 권한을 묻지 않는다(물으면 죽는다).
+/usr/libexec/PlistBuddy -c 'Print :NSCalendarsFullAccessUsageDescription' "$OUT/Contents/Info.plist" >/dev/null || { echo "권한 문구 누락"; exit 1; }
 # 말 도우미를 실행 파일 옆에 둔다.
 cp helper/bubble "$OUT/Contents/MacOS/bubble"
 # 우클릭 메뉴의 버튼 그림(도우미가 파일로 읽는다).

@@ -10,13 +10,20 @@
 //   {"op":"menu","dir":"그림 폴더","items":["ctrl","sonnet","what","hey"], "x":..,"y":..,"fy":..}  캐릭터 옆 그림 버튼 메뉴
 //   {"op":"hidemenu"}
 //   {"op":"scan","px":..,"py":..,"cell":16}         그 점이 있는 화면을 찍어 칸마다 복잡도를 잰다(혼자 돌아다니기용)
+//   {"op":"ctx"}                                    맥과 주변 정보(일정·할 일·날씨·지금 쓰는 앱·음악 등)를 모아 돌려준다
+//   {"op":"act","id":n,"name":"music|volume|open_app|open_url|add_reminder|add_event","input":{…}}  다른 앱 움직이기
 // 표준 출력(한 줄씩): "over"/"out"(마우스가 글씨 위에 들어옴/나감) | "click"(글씨를 누름) | "typing"(입력칸에 처음 글을 침)
 //                   | "esc"(Esc, 또는 아무것도 안 친 채 5초) | "submit <base64 글>"
 //                   | "menu <버튼 이름>"(메뉴 버튼을 누름) | "menuclose"(바깥을 눌렀거나 한동안 안 써서 닫힘)
+//                   | "ctx <base64 글>"(맥과 주변 정보, 한 줄에 하나씩, 한국어)
+//                   | "acted <id> ok|fail <base64 한마디>"(act 결과)
 //                   | "grid <열> <행> <화면 x> <화면 y> <칸 pt> <base64 busy> <base64 edge>" | "noscan"(권한 없음·실패)
 // 표준 입력이 닫히면(앱이 끝나면) 같이 끝난다.
 import Cocoa
 import ScreenCaptureKit
+import EventKit
+import CoreLocation
+import IOKit.ps
 
 let textMaxW: CGFloat = 320    // 글 최대 폭(상자 안쪽)
 let fontSize: CGFloat = 14     // 입력칸과 같은 크기·글꼴, 굵기만 조금 더
@@ -588,8 +595,640 @@ final class Talk: NSObject, NSTextFieldDelegate {
         case "hide": textPanel.orderOut(nil); hideInput()
         case "menu": showMenu(dir: j["dir"] as? String ?? "", items: j["items"] as? [String] ?? [])
         case "hidemenu": hideMenu()
+        case "ctx": macContext.gather()
+        case "act": macContext.act(id: j["id"] as? Int ?? 0, name: j["name"] as? String ?? "",
+                                   input: j["input"] as? [String: Any] ?? [:])
         case "scan": scan(at: CGPoint(x: j["px"] as? Double ?? 0, y: j["py"] as? Double ?? 0), cell: CGFloat(j["cell"] as? Double ?? 16))
         default: break
+        }
+    }
+}
+
+// ---------------------------------------------------------------- 맥과 주변 정보
+// 캐릭터가 말할 거리. 사용자의 맥에서 읽기만 하고 아무것도 바꾸지 않는다. 메일·메시지 본문, 클립보드,
+// 파일 내용은 읽지 않는다. 한국어 한 줄씩 모아 "ctx <base64>" 로 돌려준다(Godot 가 Claude 프롬프트에 붙인다).
+// 권한: 캘린더·미리 알림·위치(처음 한 번 묻는다), 음악·Spotify·메일(실행 중일 때만, 자동화 권한).
+// 권한 문구(Info.plist)가 없는 실행(개발 중 res://helper/bubble)에서는 묻지 않는다. 물으면 죽는다.
+
+func hasUsage(_ key: String) -> Bool { Bundle.main.object(forInfoDictionaryKey: key) != nil }
+
+// 다른 앱에 AppleScript 로 묻는다(백그라운드에서만 부를 것). 처음엔 자동화 권한 창이 떠서 오래 걸릴 수 있다.
+func osa(_ src: String) -> String {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+    p.arguments = ["-e", src]
+    let out = Pipe()
+    p.standardOutput = out
+    p.standardError = FileHandle.nullDevice
+    do { try p.run() } catch { return "" }
+    let deadline = Date().addingTimeInterval(90)
+    while p.isRunning && Date() < deadline { usleep(50_000) }
+    if p.isRunning { p.terminate(); return "" }
+    let d = out.fileHandleForReading.readDataToEndOfFile()
+    return (String(data: d, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func hm(_ d: Date) -> String {
+    let f = DateFormatter(); f.dateFormat = "HH:mm"; return f.string(from: d)
+}
+
+func cut(_ s: String, _ n: Int) -> String { s.count <= n ? s : String(s.prefix(n)) + "…" }
+
+// WMO 날씨 코드 → 한국어
+func sky(_ c: Int) -> String {
+    switch c {
+    case 0: return "맑음"
+    case 1: return "대체로 맑음"
+    case 2: return "구름 조금"
+    case 3: return "흐림"
+    case 45, 48: return "안개"
+    case 51...57: return "이슬비"
+    case 66, 67: return "어는 비"
+    case 61...65: return "비"
+    case 71...77: return "눈"
+    case 80...82: return "소나기"
+    case 85, 86: return "눈 소나기"
+    case 95...99: return "뇌우"
+    default: return "알 수 없음"
+    }
+}
+
+final class MacContext: NSObject, CLLocationManagerDelegate {
+    let store = EKEventStore()
+    let loc = CLLocationManager()
+    var place: (lat: Double, lon: Double, name: String, t: Date)?
+    var locating = false
+    var locDone: [() -> Void] = []
+    var weather: (lines: [String], t: Date)?
+    var lastApp: NSRunningApplication?   // 이 앱을 빼고 마지막으로 앞에 있던 앱
+    var busy = false
+
+    override init() {
+        super.init()
+        loc.delegate = self
+        if let a = NSWorkspace.shared.frontmostApplication, !own(a) { lastApp = a }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] n in
+            guard let self, let a = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  !self.own(a) else { return }
+            self.lastApp = a
+        }
+    }
+
+    func own(_ a: NSRunningApplication) -> Bool {
+        a.processIdentifier == getpid() || a.processIdentifier == getppid()
+    }
+
+    // 모두 모아 한 번에 보낸다. 느린 것(날씨·할 일·AppleScript)은 기다렸다가.
+    func gather() {
+        if busy { return }
+        busy = true
+        var lines: [String] = []
+        var slow: [String: [String]] = [:]
+        let lock = NSLock()
+        let g = DispatchGroup()
+        func put(_ k: String, _ v: [String]) { lock.lock(); slow[k] = v; lock.unlock() }
+
+        lines += system()
+        g.enter()
+        access(.event) { ok in
+            put("cal", ok ? self.events() : [])
+            g.leave()
+        }
+        g.enter()
+        access(.reminder) { ok in
+            if !ok { g.leave(); return }
+            self.reminders { put("rem", $0); g.leave() }
+        }
+        g.enter()
+        locate {
+            self.fetchWeather { put("wx", $0); g.leave() }
+        }
+        let running = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier })
+        g.enter()
+        DispatchQueue.global().async {
+            put("osa", self.scripted(running))
+            g.leave()
+        }
+        g.notify(queue: .main) {
+            for k in ["cal", "rem", "wx", "osa"] { lines += slow[k] ?? [] }
+            let text = lines.joined(separator: "\n")
+            emit("ctx " + Data(text.utf8).base64EncodedString())
+            self.busy = false
+        }
+    }
+
+    // ------------------------------------------------ 권한 없이 바로 아는 것
+    func system() -> [String] {
+        var out: [String] = []
+        let name = NSFullUserName()
+        if !name.isEmpty { out.append("맥 사용자 이름: \(name)") }
+        if let a = lastApp, !a.isTerminated, let n = a.localizedName {
+            var s = "지금 쓰는 앱: \(n)"
+            if let title = windowTitle(a.processIdentifier), !title.isEmpty, title != n {
+                s += " (창 제목: \(cut(title, 70)))"
+            }
+            out.append(s)
+        }
+        let apps = NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular && !own($0) && $0.bundleIdentifier != "com.apple.finder" }
+            .compactMap { $0.localizedName }
+        if !apps.isEmpty { out.append("켜 둔 앱: " + apps.prefix(30).joined(separator: ", ")) }
+        let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState,
+                                                           eventType: CGEventType(rawValue: ~0)!)
+        if idle >= 120 { out.append("사용자가 키보드·마우스를 안 만진 지 \(Int(idle / 60))분") }
+        out += battery()
+        if let v = try? URL(fileURLWithPath: "/").resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+           let free = v.volumeAvailableCapacityForImportantUsage {
+            out.append("디스크 남은 공간: \(free / 1_000_000_000)GB")
+        }
+        let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        out.append("화면 모드: \(dark ? "다크" : "라이트")")
+        return out
+    }
+
+    // 그 앱의 맨 앞 창 제목(화면 기록 권한이 있어야 보인다).
+    func windowTitle(_ pid: pid_t) -> String? {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                as? [[String: Any]] else { return nil }
+        for w in list where (w[kCGWindowOwnerPID as String] as? pid_t) == pid && (w[kCGWindowLayer as String] as? Int) == 0 {
+            if let t = w[kCGWindowName as String] as? String, !t.isEmpty { return t }
+        }
+        return nil
+    }
+
+    func battery() -> [String] {
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let list = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else { return [] }
+        for ps in list {
+            guard let d = IOPSGetPowerSourceDescription(info, ps)?.takeUnretainedValue() as? [String: Any],
+                  let cur = d[kIOPSCurrentCapacityKey] as? Int, let max = d[kIOPSMaxCapacityKey] as? Int, max > 0
+            else { continue }
+            let pct = cur * 100 / max
+            let charging = (d[kIOPSIsChargingKey] as? Bool) ?? false
+            let ac = (d[kIOPSPowerSourceStateKey] as? String) == kIOPSACPowerValue
+            return ["배터리: \(pct)%" + (charging ? ", 충전 중" : ac ? ", 전원 연결됨" : ", 배터리로 쓰는 중")]
+        }
+        return []
+    }
+
+    // ------------------------------------------------ 캘린더·미리 알림
+    func access(_ type: EKEntityType, _ done: @escaping (Bool) -> Void) {
+        let key = type == .event ? "NSCalendarsFullAccessUsageDescription" : "NSRemindersFullAccessUsageDescription"
+        let st = EKEventStore.authorizationStatus(for: type)
+        if st.rawValue == 3 { done(true); return }          // fullAccess(=예전 authorized)
+        guard st == .notDetermined, hasUsage(key) else { done(false); return }
+        let cb: (Bool, Error?) -> Void = { ok, _ in DispatchQueue.main.async { done(ok) } }
+        if #available(macOS 14, *) {
+            if type == .event { store.requestFullAccessToEvents(completion: cb) }
+            else { store.requestFullAccessToReminders(completion: cb) }
+        } else {
+            store.requestAccess(to: type, completion: cb)
+        }
+    }
+
+    // 오늘·내일 일정(지난 것은 뺀다). 하루 종일 일정(공휴일·생일 포함)도.
+    func events() -> [String] {
+        let cal = Calendar.current, now = Date()
+        let start = cal.startOfDay(for: now)
+        let end = cal.date(byAdding: .day, value: 2, to: start)!
+        let evs = store.events(matching: store.predicateForEvents(withStart: start, end: end, calendars: nil))
+            .filter { $0.endDate > now }
+            .sorted { ($0.isAllDay ? 0 : 1, $0.startDate) < ($1.isAllDay ? 0 : 1, $1.startDate) }
+        var out: [String] = []
+        for e in evs.prefix(8) {
+            let title = cut(e.title ?? "(제목 없음)", 40)
+            let day = cal.isDateInToday(e.startDate) || e.startDate < now ? "오늘" : "내일"
+            if e.isAllDay {
+                out.append("일정: \(day) 하루 종일 \(title)")
+            } else if e.startDate <= now {
+                out.append("일정: 지금 진행 중 \(title) (\(hm(e.endDate))까지)")
+            } else {
+                let mins = Int(e.startDate.timeIntervalSince(now) / 60)
+                let left = mins < 60 ? "\(mins)분 뒤" : mins < 24 * 60 ? "\(mins / 60)시간 뒤" : ""
+                out.append("일정: \(day) \(hm(e.startDate)) \(title)" + (left.isEmpty ? "" : " (\(left))"))
+            }
+        }
+        if out.isEmpty { out.append("일정: 오늘·내일 남은 일정 없음") }
+        return out
+    }
+
+    // 끝내지 않은 할 일. 기한이 있는 것(지난 것, 가까운 것)부터.
+    func reminders(_ done: @escaping ([String]) -> Void) {
+        let pred = store.predicateForIncompleteReminders(withDueDateStarting: nil, ending: nil, calendars: nil)
+        store.fetchReminders(matching: pred) { rs in
+            let cal = Calendar.current, now = Date()
+            func due(_ r: EKReminder) -> Date? { r.dueDateComponents.flatMap { cal.date(from: $0) } }
+            let sorted = (rs ?? []).sorted {
+                switch (due($0), due($1)) {
+                case let (a?, b?): return a < b
+                case (_?, nil): return true
+                default: return false
+                }
+            }
+            var out: [String] = []
+            for r in sorted.prefix(6) {
+                var s = "할 일: \(cut(r.title ?? "", 40))"
+                if let d = due(r) {
+                    let days = cal.dateComponents([.day], from: cal.startOfDay(for: now), to: cal.startOfDay(for: d)).day ?? 0
+                    s += days < 0 ? " (\(-days)일 지남)" : days == 0 ? " (오늘까지)" : days == 1 ? " (내일까지)" : " (\(days)일 뒤까지)"
+                }
+                out.append(s)
+            }
+            DispatchQueue.main.async { done(out) }
+        }
+    }
+
+    // ------------------------------------------------ 위치·날씨
+    // 맥 위치 서비스를 먼저 쓰고, 안 되면(거절·실패·15초) 인터넷 주소로 대략의 도시를 잡는다. 한 시간 둔다.
+    func locate(_ done: @escaping () -> Void) {
+        if let p = place, Date().timeIntervalSince(p.t) < 3600 { done(); return }
+        locDone.append(done)
+        if locating { return }
+        locating = true
+        let st = loc.authorizationStatus
+        if st == .denied || st == .restricted || !hasUsage("NSLocationUsageDescription") { ipLocate(); return }
+        if st == .notDetermined { loc.requestWhenInUseAuthorization() } else { loc.requestLocation() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+            if self?.locating == true { self?.ipLocate() }
+        }
+    }
+
+    func locationManagerDidChangeAuthorization(_ m: CLLocationManager) {
+        guard locating else { return }
+        switch m.authorizationStatus {
+        case .notDetermined: break
+        case .denied, .restricted: ipLocate()
+        default: m.requestLocation()
+        }
+    }
+
+    func locationManager(_ m: CLLocationManager, didUpdateLocations ls: [CLLocation]) {
+        guard locating, let l = ls.last else { return }
+        CLGeocoder().reverseGeocodeLocation(l, preferredLocale: Locale(identifier: "ko_KR")) { ps, _ in
+            let p = ps?.first
+            let name = [p?.locality, p?.subLocality].compactMap { $0 }.joined(separator: " ")
+            DispatchQueue.main.async { self.found(l.coordinate.latitude, l.coordinate.longitude, name) }
+        }
+    }
+
+    func locationManager(_ m: CLLocationManager, didFailWithError error: Error) {
+        if locating { ipLocate() }
+    }
+
+    func ipLocate() {
+        guard let url = URL(string: "https://get.geojs.io/v1/ip/geo.json") else { return }
+        URLSession.shared.dataTask(with: URLRequest(url: url, timeoutInterval: 10)) { d, _, _ in
+            let j = d.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            let lat = Double(j?["latitude"] as? String ?? ""), lon = Double(j?["longitude"] as? String ?? "")
+            DispatchQueue.main.async {
+                guard let lat, let lon else { self.found(nil, nil, ""); return }
+                // 이름은 한국어로(위치 권한 없이도 된다). 안 되면 영어 도시 이름.
+                CLGeocoder().reverseGeocodeLocation(CLLocation(latitude: lat, longitude: lon),
+                                                    preferredLocale: Locale(identifier: "ko_KR")) { ps, _ in
+                    let p = ps?.first
+                    let name = [p?.locality, p?.subLocality].compactMap { $0 }.joined(separator: " ")
+                    DispatchQueue.main.async { self.found(lat, lon, name.isEmpty ? (j?["city"] as? String ?? "") : name) }
+                }
+            }
+        }.resume()
+    }
+
+    func found(_ lat: Double?, _ lon: Double?, _ name: String) {
+        guard locating else { return }
+        locating = false
+        if let lat, let lon {
+            if let old = place, abs(old.lat - lat) + abs(old.lon - lon) > 0.05 { weather = nil }
+            place = (lat, lon, name, Date())
+        }
+        let cbs = locDone
+        locDone = []
+        cbs.forEach { $0() }
+    }
+
+    // Open-Meteo(가입·키 없음). 30분 둔다.
+    func fetchWeather(_ done: @escaping ([String]) -> Void) {
+        guard let p = place else { done([]); return }
+        if let w = weather, Date().timeIntervalSince(w.t) < 1800 { done(w.lines); return }
+        let q = "latitude=\(p.lat)&longitude=\(p.lon)&timezone=auto"
+        let wx = "https://api.open-meteo.com/v1/forecast?\(q)&forecast_days=2&wind_speed_unit=ms"
+            + "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m"
+            + "&hourly=precipitation_probability,weather_code"
+            + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset,uv_index_max"
+        let air = "https://air-quality-api.open-meteo.com/v1/air-quality?\(q)&current=pm10,pm2_5"
+        // Open-Meteo 날씨 서버가 막히는 때가 있어서(2026-11-14 집 네트워크에서 연결 안 됨) 안 되면 노르웨이 기상청(met.no).
+        let met = "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=\(String(format: "%.3f", p.lat))&lon=\(String(format: "%.3f", p.lon))"
+        var js: [Int: [String: Any]] = [:]
+        let g = DispatchGroup()
+        for (i, u) in [wx, air, met].enumerated() {
+            guard let url = URL(string: u) else { continue }
+            var r = URLRequest(url: url, timeoutInterval: 10)
+            r.setValue("37RHHG/1.0 (desktop character app)", forHTTPHeaderField: "User-Agent")   // met.no 는 이게 없으면 거절
+            g.enter()
+            URLSession.shared.dataTask(with: r) { d, _, _ in
+                let j = d.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                DispatchQueue.main.async { if let j { js[i] = j }; g.leave() }
+            }.resume()
+        }
+        g.notify(queue: .main) {
+            var lines = self.weatherLines(p.name, js[0], js[1])
+            if lines.isEmpty { lines = self.metLines(p.name, js[2], js[1]) }
+            if !lines.isEmpty { self.weather = (lines, Date()) }
+            done(lines)
+        }
+    }
+
+    func dust(_ a: [String: Any]?) -> [String] {
+        guard let c = a?["current"] as? [String: Any], let p10 = c["pm10"] as? Double, let p25 = c["pm2_5"] as? Double else { return [] }
+        let pm10 = Int(p10.rounded()), pm25 = Int(p25.rounded())
+        func grade(_ v: Int, _ t: [Int]) -> String { v <= t[0] ? "좋음" : v <= t[1] ? "보통" : v <= t[2] ? "나쁨" : "매우 나쁨" }
+        return ["미세먼지 \(pm10)㎍/㎥(\(grade(pm10, [30, 80, 150]))), 초미세먼지 \(pm25)㎍/㎥(\(grade(pm25, [15, 35, 75])))"]
+    }
+
+    // met.no 기호 이름 → 한국어
+    func metSky(_ code: String) -> String {
+        let c = code.components(separatedBy: "_").first ?? code
+        if c.contains("thunder") { return "뇌우" }
+        if c.contains("sleet") { return "진눈깨비" }
+        if c.contains("snow") { return c.contains("showers") ? "눈 소나기" : "눈" }
+        if c.contains("rain") {
+            if c.contains("showers") { return "소나기" }
+            return c.hasPrefix("light") ? "약한 비" : c.hasPrefix("heavy") ? "강한 비" : "비"
+        }
+        switch c {
+        case "clearsky": return "맑음"
+        case "fair": return "대체로 맑음"
+        case "partlycloudy": return "구름 조금"
+        case "cloudy": return "흐림"
+        case "fog": return "안개"
+        default: return c
+        }
+    }
+
+    func metLines(_ name: String, _ w: [String: Any]?, _ a: [String: Any]?) -> [String] {
+        guard let props = w?["properties"] as? [String: Any], let ts = props["timeseries"] as? [[String: Any]], !ts.isEmpty
+        else { return [] }
+        let iso = ISO8601DateFormatter()
+        let cal = Calendar.current, now = Date()
+        typealias Row = (t: Date, temp: Double, rh: Double, wind: Double, sym: String, rain: Double)
+        var rows: [Row] = []
+        for e in ts {
+            guard let t = (e["time"] as? String).flatMap({ iso.date(from: $0) }),
+                  let data = e["data"] as? [String: Any],
+                  let det = ((data["instant"] as? [String: Any])?["details"]) as? [String: Any] else { continue }
+            let next = (data["next_1_hours"] ?? data["next_6_hours"]) as? [String: Any]
+            let sym = ((next?["summary"] as? [String: Any])?["symbol_code"] as? String) ?? ""
+            let rain = ((next?["details"] as? [String: Any])?["precipitation_amount"] as? Double) ?? 0
+            rows.append((t, det["air_temperature"] as? Double ?? 0, det["relative_humidity"] as? Double ?? 0,
+                         det["wind_speed"] as? Double ?? 0, sym, rain))
+        }
+        guard let cur = rows.first(where: { $0.t.addingTimeInterval(3600) > now }) else { return [] }
+        var out: [String] = []
+        let at = name.isEmpty ? "" : "(\(name))"
+        out.append("날씨\(at): 지금 \(metSky(cur.sym)) \(Int(cur.temp.rounded()))℃, 습도 \(Int(cur.rh.rounded()))%, 바람 \(Int(cur.wind.rounded()))m/s")
+        for (off, label) in [(0, "오늘 남은 시간"), (1, "내일")] {
+            guard let day = cal.date(byAdding: .day, value: off, to: now) else { continue }
+            let rs = rows.filter { cal.isDate($0.t, inSameDayAs: day) && $0.t >= cur.t }
+            guard let lo = rs.map(\.temp).min(), let hi = rs.map(\.temp).max() else { continue }
+            let wet = rs.filter { $0.rain >= 0.2 }
+            let mid = rs.min { abs($0.t.timeIntervalSince(day) ) < abs($1.t.timeIntervalSince(day)) }
+            let sky = wet.isEmpty ? metSky((off == 1 ? rs.first { cal.component(.hour, from: $0.t) >= 12 } ?? mid : mid)?.sym ?? "") : metSky(wet[0].sym)
+            out.append("\(label): \(sky), \(Int(lo.rounded()))~\(Int(hi.rounded()))℃" + (wet.isEmpty ? ", 비·눈 없음" : ", 비·눈 있음"))
+        }
+        let soon = rows.filter { $0.t >= cur.t && $0.t < now.addingTimeInterval(12 * 3600) }
+        if let r = soon.first(where: { $0.rain >= 0.2 }) {
+            out.append("앞으로 12시간: \(cal.component(.hour, from: r.t))시쯤 \(metSky(r.sym))(시간당 \(r.rain)mm)")
+        } else {
+            out.append("앞으로 12시간: 비·눈 소식 없음")
+        }
+        return out + dust(a)
+    }
+
+    func weatherLines(_ name: String, _ w: [String: Any]?, _ a: [String: Any]?) -> [String] {
+        guard let w, let cur = w["current"] as? [String: Any] else { return [] }
+        func n(_ v: Any?) -> Int { Int(((v as? Double) ?? Double((v as? Int) ?? 0)).rounded()) }
+        var out: [String] = []
+        let at = name.isEmpty ? "" : "(\(name))"
+        out.append("날씨\(at): 지금 \(sky(n(cur["weather_code"]))) \(n(cur["temperature_2m"]))℃(체감 \(n(cur["apparent_temperature"]))℃), "
+                   + "습도 \(n(cur["relative_humidity_2m"]))%, 바람 \(n(cur["wind_speed_10m"]))m/s")
+        if let d = w["daily"] as? [String: Any] {
+            func col(_ k: String) -> [Any] { d[k] as? [Any] ?? [] }
+            func hhmm(_ v: Any?) -> String { (v as? String)?.components(separatedBy: "T").last ?? "" }
+            for (i, label) in [(0, "오늘"), (1, "내일")] where col("weather_code").count > i {
+                var s = "\(label): \(sky(n(col("weather_code")[i]))), \(n(col("temperature_2m_min")[i]))~\(n(col("temperature_2m_max")[i]))℃, "
+                    + "비·눈 확률 최대 \(n(col("precipitation_probability_max")[i]))%"
+                if i == 0 {
+                    s += ", 해 뜸 \(hhmm(col("sunrise").first)) 해 짐 \(hhmm(col("sunset").first)), 자외선 지수 \(n(col("uv_index_max").first))"
+                }
+                out.append(s)
+            }
+        }
+        // 앞으로 12시간 안에 비·눈이 올 것 같은 첫 시각
+        if let h = w["hourly"] as? [String: Any], let times = h["time"] as? [String],
+           let probs = h["precipitation_probability"] as? [Any], let codes = h["weather_code"] as? [Any],
+           let now = cur["time"] as? String,
+           let i0 = times.firstIndex(where: { $0.prefix(13) == now.prefix(13) }) {
+            var said = false
+            for i in i0..<min(i0 + 12, times.count, probs.count, codes.count) where n(probs[i]) >= 50 {
+                let hour = times[i].components(separatedBy: "T").last?.prefix(2) ?? ""
+                out.append("앞으로 12시간: \(hour)시쯤 \(sky(n(codes[i]))) 가능성(확률 \(n(probs[i]))%)")
+                said = true
+                break
+            }
+            if !said { out.append("앞으로 12시간: 비·눈 소식 없음") }
+        }
+        return out + dust(a)
+    }
+
+    // ------------------------------------------------ 다른 앱(실행 중일 때만 묻는다. 안 켜져 있으면 깨우지 않는다)
+    func scripted(_ running: Set<String>) -> [String] {
+        var out: [String] = []
+        if running.contains("com.apple.Music") {
+            let s = osa("tell application \"Music\" to if player state is playing then return (name of current track) & \" — \" & (artist of current track)")
+            if !s.isEmpty { out.append("음악 앱에서 듣는 중: \(cut(s, 60))") }
+        }
+        if running.contains("com.spotify.client") {
+            let s = osa("tell application \"Spotify\" to if player state is playing then return (name of current track) & \" — \" & (artist of current track)")
+            if !s.isEmpty { out.append("Spotify 에서 듣는 중: \(cut(s, 60))") }
+        }
+        out += browsers(running)
+        if running.contains("com.apple.mail") {
+            let s = osa("tell application \"Mail\" to return unread count of inbox")
+            if let c = Int(s) { out.append("메일 받은 편지함의 읽지 않은 메일: \(c)통") }
+        }
+        return out
+    }
+}
+
+extension MacContext {
+    // 켜져 있는 브라우저마다 보고 있는 탭(제목·사이트)과 열린 유튜브 영상. 재생 중인지는 모른다
+    // (알려면 브라우저에서 "Apple 이벤트의 JavaScript 허용"을 켜야 해서 안 한다).
+    func browsers(_ running: Set<String>) -> [String] {
+        // (번들 id, 앱 이름, 탭 제목 속성, 지금 탭 속성)
+        let list = [("company.thebrowser.Browser", "Arc", "title", "active tab"),
+                    ("company.thebrowser.dia", "Dia", "title", "active tab"),
+                    ("com.google.Chrome", "Google Chrome", "title", "active tab"),
+                    ("com.brave.Browser", "Brave Browser", "title", "active tab"),
+                    ("com.microsoft.edgemac", "Microsoft Edge", "title", "active tab"),
+                    ("com.naver.Whale", "Whale", "title", "active tab"),
+                    ("com.apple.Safari", "Safari", "name", "current tab")]
+        var out: [String] = []
+        for (id, app, title, cur) in list where running.contains(id) {
+            let s = osa("""
+            tell application "\(app)"
+                set out to ""
+                try
+                    -- 창 이름이 지금 탭 제목이다(Arc 는 탭의 title 이 "YouTube" 처럼 낡아 있을 때가 있다).
+                    set nm to name of front window
+                    set u to ""
+                    try
+                        set u to URL of (\(cur) of front window)
+                    end try
+                    set out to "A|" & nm & "|" & u & linefeed
+                end try
+                set n to 0
+                repeat with w in windows
+                    try
+                        repeat with t in tabs of w
+                            set u to URL of t
+                            if n < 3 and (u contains "youtube.com/watch" or u contains "youtu.be/") then
+                                set out to out & "Y|" & (\(title) of t) & "|" & u & linefeed
+                                set n to n + 1
+                            end if
+                        end repeat
+                    end try
+                end repeat
+                return out
+            end tell
+            """)
+            let short = app == "Google Chrome" ? "Chrome" : app
+            for line in s.split(separator: "\n") {
+                let f = line.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
+                guard f.count == 3, !f[1].isEmpty else { continue }
+                if f[0] == "A" {
+                    let host = URL(string: f[2])?.host?.replacingOccurrences(of: "www.", with: "") ?? ""
+                    out.append("\(short) 에서 보는 탭: \(cut(f[1], 60))" + (host.isEmpty ? "" : " (\(host))"))
+                } else if f[1] != "YouTube" {   // 아직 안 불러온 탭은 제목이 그냥 YouTube
+                    out.append("\(short) 에 열린 유튜브: \(cut(f[1].replacingOccurrences(of: " - YouTube", with: ""), 60))")
+                }
+            }
+        }
+        return out
+    }
+}
+
+// ---------------------------------------------------------------- 다른 앱 움직이기
+// 사용자가 부탁했을 때만(Claude 가 도구를 고르면 Godot 이 보낸다). 되돌리기 어려운 것(보내기·지우기)은 없다.
+// 할 일·일정 넣기는 Godot 이 먼저 사용자에게 물어보고 나서 보낸다. 결과: "acted <id> ok|fail <base64 한마디>"
+
+func osaQuote(_ s: String) -> String {
+    "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+}
+
+func localDate(_ s: String) -> Date? {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    for fmt in ["yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd"] {
+        f.dateFormat = fmt
+        if let d = f.date(from: s) { return d }
+    }
+    return nil
+}
+
+extension MacContext {
+    func act(id: Int, name: String, input: [String: Any]) {
+        let done: (Bool, String) -> Void = { ok, msg in
+            DispatchQueue.main.async { emit("acted \(id) \(ok ? "ok" : "fail") " + Data(msg.utf8).base64EncodedString()) }
+        }
+        func str(_ k: String) -> String { (input[k] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
+        switch name {
+        case "music":
+            DispatchQueue.global().async { self.music(str("action"), str("query"), str("app"), done) }
+        case "volume":
+            let lv = max(0, min(100, (input["level"] as? Int) ?? Int((input["level"] as? Double) ?? 50)))
+            DispatchQueue.global().async {
+                _ = osa("set volume output volume \(lv)")
+                done(true, "소리 크기를 \(lv)로 맞췄어.")
+            }
+        case "open_app":
+            let app = str("name")
+            DispatchQueue.global().async {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                p.arguments = ["-a", app]
+                p.standardError = FileHandle.nullDevice
+                p.standardOutput = FileHandle.nullDevice
+                do { try p.run(); p.waitUntilExit() } catch {}
+                let ok = p.terminationStatus == 0
+                done(ok, ok ? "\(app) 열었어." : "\(app) 앱을 못 찾았어.")
+            }
+        case "open_url":
+            guard let u = URL(string: str("url")), ["http", "https"].contains(u.scheme?.lowercased() ?? "") else {
+                done(false, "그 주소는 못 열겠어."); return
+            }
+            NSWorkspace.shared.open(u)
+            done(true, "열었어.")
+        case "add_reminder":
+            guard EKEventStore.authorizationStatus(for: .reminder).rawValue == 3,
+                  let cal = store.defaultCalendarForNewReminders() else { done(false, "미리 알림 권한이 없어."); return }
+            let r = EKReminder(eventStore: store)
+            r.title = str("title")
+            r.calendar = cal
+            if let d = localDate(str("due")) {
+                r.dueDateComponents = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: d)
+                if str("due").count > 10 { r.addAlarm(EKAlarm(absoluteDate: d)) }
+            }
+            do { try store.save(r, commit: true); done(true, "할 일에 넣었어.") }
+            catch { done(false, "할 일에 못 넣었어.") }
+        case "add_event":
+            guard EKEventStore.authorizationStatus(for: .event).rawValue == 3,
+                  let cal = store.defaultCalendarForNewEvents else { done(false, "캘린더 권한이 없어."); return }
+            guard let start = localDate(str("start")) else { done(false, "시간을 잘 모르겠어."); return }
+            let mins = (input["minutes"] as? Int) ?? Int((input["minutes"] as? Double) ?? 60)
+            let e = EKEvent(eventStore: store)
+            e.title = str("title")
+            e.calendar = cal
+            e.startDate = start
+            e.endDate = start.addingTimeInterval(Double(max(5, mins)) * 60)
+            do { try store.save(e, span: .thisEvent, commit: true); done(true, "캘린더에 넣었어.") }
+            catch { done(false, "캘린더에 못 넣었어.") }
+        default:
+            done(false, "그건 아직 못 해.")
+        }
+    }
+
+    // 음악 앱 또는 Spotify. app 을 안 정하면 켜져 있는 쪽(둘 다 아니면 음악 앱).
+    func music(_ action: String, _ query: String, _ app0: String, _ done: (Bool, String) -> Void) {
+        let running = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier })
+        var app = app0
+        if app != "Music" && app != "Spotify" {
+            app = running.contains("com.spotify.client") && !running.contains("com.apple.Music") ? "Spotify" : "Music"
+        }
+        let tell = "tell application \"\(app)\" to "
+        switch action {
+        case "pause": _ = osa(tell + "pause"); done(true, "멈췄어.")
+        case "next": _ = osa(tell + "next track"); done(true, "다음 곡!")
+        case "previous": _ = osa(tell + "previous track"); done(true, "이전 곡!")
+        case "search_play" where !query.isEmpty:
+            if app == "Spotify" { done(false, "Spotify 는 찾아서 틀 수가 없어. 음악 앱이면 돼."); return }
+            let q = osaQuote(query)
+            let s = osa("""
+            tell application "Music"
+                if exists user playlist \(q) then
+                    play user playlist \(q)
+                    return "목록 " & \(q)
+                end if
+                set r to (search library playlist 1 for \(q))
+                if r is {} then return ""
+                play item 1 of r
+                return (name of item 1 of r) & " — " & (artist of item 1 of r)
+            end tell
+            """)
+            done(!s.isEmpty, s.isEmpty ? "보관함에서 '\(query)'을 못 찾았어." : "\(s) 틀었어.")
+        default:
+            _ = osa(tell + "play")
+            let s = osa(tell + "if player state is playing then return (name of current track) & \" — \" & (artist of current track)")
+            done(true, s.isEmpty ? "틀었어." : "\(s) 틀었어.")
         }
     }
 }
@@ -603,6 +1242,7 @@ freopen("/dev/null", "w", stderr)
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let talk = Talk()
+let macContext = MacContext()
 Thread.detachNewThread {
     while let line = readLine() {
         guard let d = line.data(using: .utf8),

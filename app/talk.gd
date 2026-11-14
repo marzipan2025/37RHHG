@@ -58,6 +58,49 @@ var http: HTTPRequest
 var grid := {}
 var scan_denied := false
 var pending := Callable()
+# 맥과 주변 정보(도우미가 모아 준 한국어 줄들: 일정·할 일·날씨·지금 쓰는 앱·음악 등). 프롬프트에 붙인다.
+const CTX_EVERY := 300.0       # 이만큼(초)마다 새로 받는다
+const CTX_NUDGE := 0.45        # 먼저 말 걸 때 맥과 주변 정보에서 이야깃거리를 고를 확률
+var mac := ""
+var ctx_left := 3.0
+
+# 다른 앱 움직이기(Claude 도구). 사용자가 답장으로 부탁할 때만 도구를 같이 보낸다.
+# 도구를 고르면 두 번째 호출 없이 바로 실행하고, Claude 가 같이 쓴 한마디(없으면 도우미의 한마디)를 띄운다.
+# 할 일·일정 넣기는 먼저 "넣을까?"로 묻고 응이면 넣는다. 타이머는 이 앱이 직접 센다(state.timers).
+const TOOLS := [
+	{"name": "music", "description": "맥의 음악 앱(또는 Spotify)을 조작한다. search_play 는 음악 앱 보관함에서 곡·가수·앨범·플레이리스트 이름으로 찾아 튼다.",
+		"input_schema": {"type": "object", "properties": {
+			"action": {"type": "string", "enum": ["play", "pause", "next", "previous", "search_play"]},
+			"query": {"type": "string", "description": "search_play 일 때 찾을 말"},
+			"app": {"type": "string", "enum": ["Music", "Spotify"], "description": "사용자가 정했을 때만"}},
+			"required": ["action"]}},
+	{"name": "volume", "description": "맥의 소리 크기를 0~100으로 맞춘다.",
+		"input_schema": {"type": "object", "properties": {"level": {"type": "integer"}}, "required": ["level"]}},
+	{"name": "open_app", "description": "맥 앱을 이름으로 연다(예: Safari, Notes, Calendar, Figma).",
+		"input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
+	{"name": "open_url", "description": "웹 주소(http/https)를 기본 브라우저로 연다.",
+		"input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}},
+	{"name": "add_reminder", "description": "미리 알림에 할 일을 넣는다. 앱이 넣기 전에 사용자에게 직접 확인하므로, 너는 따로 묻지 말고 바로 이 도구를 불러라.",
+		"input_schema": {"type": "object", "properties": {
+			"title": {"type": "string"},
+			"due": {"type": "string", "description": "기한(로컬 시각) YYYY-MM-DDTHH:MM 또는 YYYY-MM-DD. 없으면 비워 둔다."}},
+			"required": ["title"]}},
+	{"name": "add_event", "description": "캘린더에 일정을 넣는다. 앱이 넣기 전에 사용자에게 직접 확인하므로, 너는 따로 묻지 말고 바로 이 도구를 불러라.",
+		"input_schema": {"type": "object", "properties": {
+			"title": {"type": "string"},
+			"start": {"type": "string", "description": "시작(로컬 시각) YYYY-MM-DDTHH:MM"},
+			"minutes": {"type": "integer", "description": "길이(분). 모르면 60"}},
+			"required": ["title", "start"]}},
+	{"name": "timer", "description": "몇 분 뒤에 캐릭터가 사용자에게 말로 알려 준다.",
+		"input_schema": {"type": "object", "properties": {
+			"minutes": {"type": "number"},
+			"message": {"type": "string", "description": "그때 할 말(반말, 짧게)"}},
+			"required": ["minutes", "message"]}},
+]
+var last_tools: Array = []     # 방금 받은 응답의 tool_use 들
+var acts := {}                 # 도우미에 보낸 동작 id → {"say": Claude 가 쓴 한마디}
+var act_id := 0
+var confirm := {}              # 넣을까? 하고 물어 둔 할 일·일정(tool_use)
 
 
 func _ready() -> void:
@@ -138,6 +181,7 @@ func _open(text: String, m: int, seconds := 0.0) -> void:
 
 
 func _close() -> void:
+	confirm = {}
 	mode = HIDDEN
 	text_hover = false
 	typing = false
@@ -178,6 +222,24 @@ func _events() -> void:
 		elif e.begins_with("menu "):
 			menu_open = false
 			menu_pick.emit(e.substr(5))
+		elif e.begins_with("acted "):
+			var f := e.split(" ")
+			if f.size() >= 3:
+				var a: Dictionary = acts.get(int(f[1]), {})
+				acts.erase(int(f[1]))
+				var msg := Marshalls.base64_to_utf8(f[3]) if f.size() > 3 else ""
+				# 됐으면 Claude 의 한마디, 안 됐으면 도우미의 한마디(왜 안 됐는지).
+				var line: String = String(a.get("say", "")) if f[2] == "ok" and not String(a.get("say", "")).is_empty() else msg
+				_push("m", line)
+				_save()
+				say(line)
+		elif e.begins_with("ctx "):
+			mac = Marshalls.base64_to_utf8(e.substr(4)).strip_edges()
+			# 확인용: user://ctx_debug 파일이 있으면 받은 정보를 user://ctx.txt 에 남긴다.
+			if FileAccess.file_exists("user://ctx_debug"):
+				var f := FileAccess.open("user://ctx.txt", FileAccess.WRITE)
+				f.store_string(mac)
+				f.close()
 		elif e == "noscan":
 			scan_denied = true
 		elif e == "typing":
@@ -200,6 +262,21 @@ func _on_submit(text: String) -> void:
 			say("키를 저장했어. 이제 가끔 말 걸게!")
 		else:
 			_close()
+		return
+	if not confirm.is_empty():
+		var c := confirm
+		confirm = {}
+		var yes := false
+		for w in ["응", "어", "네", "예", "그래", "좋아", "ㅇ", "넣어", "콜", "yes", "ok", "ㄱ"]:
+			if text.to_lower().begins_with(w):
+				yes = true
+		_push("u", text)
+		if yes:
+			_run(c, "")
+		else:
+			_push("m", "알겠어, 안 넣을게.")
+			_save()
+			say("알겠어, 안 넣을게.")
 		return
 	if text.is_empty():
 		_close()
@@ -311,6 +388,11 @@ func step(dt: float) -> void:
 			show_left -= dt
 			if show_left <= 0.0:
 				_close()
+	_timer_step()
+	ctx_left -= dt
+	if ctx_left <= 0.0:
+		ctx_left = CTX_EVERY
+		_send({"op": "ctx"})
 	nudge_left -= dt
 	if nudge_left <= 0.0:
 		nudge_left = randf_range(NUDGE_MIN, NUDGE_MAX)
@@ -342,17 +424,18 @@ func _system() -> String:
 		+ "성격: 다정하고 호기심이 많고 조금 장난스럽다. 언제나 사용자 편이고, 사용자가 하는 일을 진심으로 재미있어하고 응원한다.\n"
 		+ "- 비꼬기, 냉소, 시큰둥한 말, 훈계, 잘난 척은 하지 않는다. 장난은 놀리는 쪽이 아니라 같이 웃는 쪽으로.\n"
 		+ "- 아래 '기억'과 '최근 대화'를 실제로 써라. 사용자가 전에 한 말, 하던 일, 좋아하는 것을 구체적으로 짚어서 이어 간다.\n"
-		+ "- 뻔한 안부(날씨, 밥, 피곤하지) 대신 사용자가 하던 일이나 좋아하는 것에서 이야기를 꺼낸다. 질문은 한 번에 하나만.\n"
+		+ "- 뻔한 안부(밥 먹었어, 피곤하지) 대신 사용자가 하던 일이나 좋아하는 것에서 이야기를 꺼낸다. 질문은 한 번에 하나만.\n"
 		+ "- 사용자가 생각이나 고민을 말하면 먼저 그 마음을 알아주고, 그다음 네 생각을 궁금해하는 말투로 살짝 보탠다(\"이렇게 해 보면 어때?\" 식).\n"
-		+ "- 너는 화면 밖 세상을 볼 수 없다. 날씨·뉴스·시세처럼 모르는 사실은 지어내지 말고 모른다고 한다.\n"
+		+ "- 아래 '지금 맥과 주변'은 사용자의 맥이 방금 알려 준 실제 정보다(일정, 할 일, 날씨, 지금 쓰는 앱, 듣는 음악 등). 사용자가 물으면 이걸로 답하고, 먼저 말을 걸 때는 어울리는 것 하나만 자연스럽게 짚어라. 목록처럼 늘어놓거나 매번 꺼내지는 마라. 날씨는 비·눈·추위·더위·미세먼지처럼 사용자에게 상관있을 때만.\n"
+		+ "- 여기에 없는 사실(뉴스, 시세, 다른 지역 날씨 등)은 지어내지 말고 모른다고 한다. 너는 검색을 할 수 없다.\n"
 		+ ("- 짧게 말한다. 먼저 말을 걸 때는 한 문장 %d자 이내, 대답할 때는 한두 문장 %d자 이내(띄어쓰기 포함). 이 길이를 절대 넘기지 않는다. 줄바꿈, 이모지, 마크다운은 쓰지 않는다.\n" % [NUDGE_MAX_CHARS, REPLY_MAX_CHARS])
 		+ "말투 예시(그대로 쓰지 말고 느낌만 따라라):\n"
 		+ "- 어제 말한 그 앱, 이름은 정했어? 나 후보 듣고 싶어.\n"
 		+ "- 와, 그거 진짜 좋은 생각이다. 처음엔 작게 한번 해 보는 건 어때?\n"
 		+ "- 그건 속상했겠다. 그래도 거기까지 해낸 거 나는 대단하다고 생각해.\n"
-		+ "기억:\n%s\n지금: %d월 %d일 %s요일 %d시") % [
+		+ "기억:\n%s\n지금: %d년 %d월 %d일 %s요일 %d시 %d분\n지금 맥과 주변:\n%s") % [
 		state.memo if not String(state.memo).is_empty() else "(아직 없음. 사용자가 어떤 사람인지, 요즘 무엇을 하는지부터 알아 가라.)",
-		now.month, now.day, days[now.weekday], now.hour]
+		now.year, now.month, now.day, days[now.weekday], now.hour, now.minute, mac if not mac.is_empty() else "(아직 모름)"]
 
 
 # 그 말을 한 지 얼마나 됐는지. 며칠 만에 이어지는 대화인지 알 수 있게 한다.
@@ -383,7 +466,7 @@ func _push(r: String, t: String) -> void:
 		state.turns.pop_front()
 
 
-func _call(system: String, prompt: String, _max_tokens: int, done: Callable) -> bool:
+func _call(system: String, prompt: String, _max_tokens: int, done: Callable, tools: Array = []) -> bool:
 	_today()
 	if busy or key.is_empty() or int(state.calls) >= DAY_CALLS:
 		return false
@@ -394,6 +477,8 @@ func _call(system: String, prompt: String, _max_tokens: int, done: Callable) -> 
 		"messages": [{"role": "user", "content": prompt}],
 		"output_config": {"effort": EFFORT},
 	}
+	if not tools.is_empty():
+		body["tools"] = tools
 	var headers := PackedStringArray(["content-type: application/json", "x-api-key: " + key,
 		"anthropic-version: " + API_VERSION])
 	var err := http.request(URL, headers, HTTPClient.METHOD_POST, JSON.stringify(body))
@@ -409,6 +494,7 @@ func _call(system: String, prompt: String, _max_tokens: int, done: Callable) -> 
 func _on_done(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
 	busy = false
 	var text := ""
+	last_tools = []
 	if result == HTTPRequest.RESULT_SUCCESS and code == 200:
 		var d = JSON.parse_string(body.get_string_from_utf8())
 		if d is Dictionary:
@@ -419,6 +505,8 @@ func _on_done(result: int, code: int, _headers: PackedStringArray, body: PackedB
 				for c in d.get("content", []):
 					if c is Dictionary and c.get("type", "") == "text":
 						text += String(c.get("text", ""))
+					elif c is Dictionary and c.get("type", "") == "tool_use":
+						last_tools.append(c)
 	else:
 		print("claude 실패 result ", result, " code ", code, " ", body.get_string_from_utf8().left(200))
 	var cb := pending
@@ -435,8 +523,12 @@ func _nudge(poked: bool) -> void:
 	if not poked and int(state.nudges) >= DAY_NUDGES:
 		return
 	var prompt := "최근 대화:\n%s\n(사용자는 지금 아무 말도 하지 않았다. 네가 먼저 한마디 걸어라. " % _recent()
-	prompt += "기억의 '이어갈 것'이나 최근 대화에서 하나를 골라 그 뒤가 어떻게 됐는지 다정하게 묻거나, 사용자의 관심사에 대해 네가 궁금했던 것을 한마디 건네라. "
-	prompt += "기억이 없으면 사용자가 요즘 무엇에 빠져 있는지 물어라. 네가 최근에 한 말이나 질문을 되풀이하지 마라. 한 문장 %d자 이내.)" % NUDGE_MAX_CHARS
+	if not mac.is_empty() and randf() < CTX_NUDGE:
+		prompt += "이번에는 '지금 맥과 주변'에서 지금 사용자에게 의미 있을 만한 것 하나(곧 있을 일정, 기한이 다가온 할 일, 비 소식, 듣고 있는 노래, 붙잡고 있는 작업, 한참 쉬고 있음 등)를 골라 다정하게 한마디 건네라. 특별한 게 없으면 기억에서 골라도 된다. "
+	else:
+		prompt += "기억의 '이어갈 것'이나 최근 대화에서 하나를 골라 그 뒤가 어떻게 됐는지 다정하게 묻거나, 사용자의 관심사에 대해 네가 궁금했던 것을 한마디 건네라. "
+		prompt += "기억이 없으면 사용자가 요즘 무엇에 빠져 있는지 물어라. "
+	prompt += "네가 최근에 한 말이나 질문을 되풀이하지 마라. 한 문장 %d자 이내.)" % NUDGE_MAX_CHARS
 	var done := func(text: String, _code: int):
 		if text.is_empty():
 			if waiting:
@@ -474,7 +566,8 @@ func _fit(text: String, limit: int, done: Callable) -> void:
 
 
 func _reply(text: String) -> void:
-	var prompt := "최근 대화:\n%s사용자: %s\n(사용자의 말에 대답해라. 대화가 이어지도록, 어울리면 끝에 질문 하나를 붙여라. 한두 문장 %d자 이내.)" % [_recent(), text, REPLY_MAX_CHARS]
+	var prompt := "최근 대화:\n%s사용자: %s\n(사용자의 말에 대답해라. 대화가 이어지도록, 어울리면 끝에 질문 하나를 붙여라. 한두 문장 %d자 이내.\n" % [_recent(), text, REPLY_MAX_CHARS]
+	prompt += "사용자가 음악·소리 크기·앱 열기·웹페이지·할 일·일정·타이머를 부탁하면 도구를 써라. 도구를 쓸 때도 사용자에게 할 짧은 한마디(반말)를 텍스트로 같이 써라(예: '좋아, 틀어 줄게!'). 해 준다고 말만 하고 도구를 빼먹지 마라. 부탁하지 않은 일은 하지 마라. 도구는 한 번에 하나만.)"
 	_today()
 	if int(state.calls) >= DAY_CALLS:
 		say("오늘은 말을 너무 많이 했어. 내일 또 얘기하자.")
@@ -482,6 +575,12 @@ func _reply(text: String) -> void:
 	_open("…", SHOW)
 	waiting = true
 	var done := func(answer: String, code: int):
+		if not last_tools.is_empty():
+			if state.turns.size() > 0:
+				state.turns[-1].erase("n")
+			_push("u", text)
+			_run(last_tools[0], answer.strip_edges().replace("\n", " "))
+			return
 		if answer.is_empty():
 			say("지금은 대답을 못 하겠어. (%d)" % code)
 			return
@@ -495,7 +594,7 @@ func _reply(text: String) -> void:
 			say(a)
 			if int(state.since_memo) >= MEMO_EVERY:
 				_memo.call_deferred())
-	if not _call(_system(), prompt, 0, done):
+	if not _call(_system(), prompt, 0, done, TOOLS):
 		say("지금은 대답을 못 하겠어.")
 
 
@@ -516,3 +615,61 @@ func _memo() -> void:
 		state.since_memo = 0
 		_save()
 	_call("너는 대화에서 사람에 대한 기억을 정리하는 도우미다.", prompt, 1100, done)
+
+
+# ---------------------------------------------------------------- 다른 앱 움직이기
+
+# Claude 가 고른 도구(tool_use)를 실행한다. answer 는 Claude 가 같이 쓴 한마디(빈 글이면 도우미 한마디).
+# 할 일·일정은 아직 안 물어봤으면("ok" 표시가 없으면) 먼저 "넣을까?"로 묻고, 응이면 _on_submit 이 다시 부른다.
+func _run(tool: Dictionary, answer: String) -> void:
+	var name := String(tool.get("name", ""))
+	var input: Dictionary = tool.get("input", {})
+	if (name == "add_reminder" or name == "add_event") and not tool.get("ok", false):
+		tool["ok"] = true
+		confirm = tool
+		var what := ""
+		if name == "add_reminder":
+			var due := String(input.get("due", "")).replace("T", " ")
+			what = "할 일에 '%s'%s 넣을까?" % [input.get("title", ""), (" (%s까지)" % due) if not due.is_empty() else ""]
+		else:
+			what = "캘린더에 %s '%s' 넣을까?" % [String(input.get("start", "")).replace("T", " "), input.get("title", "")]
+		_push("m", what)
+		_save()
+		spoke.emit()
+		waiting = false
+		_open(what, REPLY)
+		return
+	if name == "timer":
+		var mins := float(input.get("minutes", 0))
+		if mins <= 0.0:
+			say("몇 분 뒤인지 모르겠어.")
+			return
+		if not state.has("timers"):
+			state.timers = []
+		state.timers.append({"at": Time.get_unix_time_from_system() + mins * 60.0, "msg": String(input.get("message", "시간 됐어!"))})
+		var line := answer if not answer.is_empty() else "%s분 뒤에 알려 줄게!" % str(snappedf(mins, 0.1)).trim_suffix(".0")
+		_push("m", line)
+		_save()
+		say(line)
+		return
+	act_id += 1
+	acts[act_id] = {"say": answer}
+	_send({"op": "act", "id": act_id, "name": name, "input": input})
+	if mode == HIDDEN or not waiting:
+		_open("…", SHOW)
+		waiting = true
+
+
+# 때가 된 타이머를 말로 알린다(말풍선이 떠 있으면 닫힐 때까지 기다린다).
+func _timer_step() -> void:
+	if not state.has("timers") or state.timers.is_empty() or mode != HIDDEN:
+		return
+	var now := Time.get_unix_time_from_system()
+	for i in state.timers.size():
+		if float(state.timers[i].at) <= now:
+			var msg := String(state.timers[i].msg)
+			state.timers.remove_at(i)
+			_push("m", msg)
+			_save()
+			say(msg, NUDGE_SHOW)
+			return

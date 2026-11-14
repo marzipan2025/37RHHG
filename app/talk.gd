@@ -1,19 +1,21 @@
 extends Node
-## 캐릭터가 가끔 말을 걸고, 말풍선을 누르면 답장할 수 있다(Gemini API 무료 등급).
+## 캐릭터가 가끔 말을 걸고, 말풍선을 누르면 답장할 수 있다(Claude API, Haiku).
 ## 지난 대화는 이 앱이 직접 쌓는다: 최근 몇 마디 + 기억 메모(사람/요즘/이어갈 것, user://talk.json).
 ## 토큰을 아끼려고 한 번 부를 때 메모와 최근 몇 마디만 보내고, 하루 호출 횟수에 상한을 둔다.
-## API 키는 저장소에 넣지 않는다. 메뉴의 "Gemini 키 넣기…"로 넣으면 user://gemini_key.txt 에 둔다.
+## API 키는 저장소에 넣지 않는다. 메뉴의 "Claude 키 넣기…"로 넣으면 user://claude_key.txt 에 둔다.
 
-const MODEL := "gemini-flash-lite-latest"
-const URL := "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent"
-const DAY_CALLS := 24          # 하루 API 호출 상한(먼저 말 걸기 + 답장 + 요약)
+const MODEL := "claude-haiku-5-5"
+const URL := "https://api.anthropic.com/v1/messages"
+const API_VERSION := "2026-10-21"
+const EFFORT := "low"          # 짧은 잡담이라 생각은 조금만(비용·속도)
+const MAX_TOKENS := 2000       # 생각하는 몫까지 포함한 상한. 말 길이는 프롬프트로 정한다.
+const DAY_CALLS := 100         # 하루 API 호출 상한(먼저 말 걸기 + 답장 + 요약)
 const DAY_NUDGES := 6          # 하루에 먼저 말 거는 횟수
 const NUDGE_MIN := 25.0 * 60.0 # 먼저 말 거는 간격(초)
 const NUDGE_MAX := 60.0 * 60.0
 const KEEP_TURNS := 12         # API 에 같이 보내는 최근 말 수
 const MEMO_EVERY := 4          # 사용자가 이만큼 답하면 기억 메모를 새로 쓴다
 const MEMO_CHARS := 800
-const OUT_TOKENS := 320
 
 const NUDGE_SHOW := 15.0       # 캐릭터가 혼자 먼저 건 말이 떠 있는 시간(초)
 const SHOW_TIME := 5.0         # 말이 떠 있는 시간(초). 이 안에 글씨를 누르면 답장할 수 있다.
@@ -60,8 +62,8 @@ func _ready() -> void:
 	http.timeout = 20.0
 	add_child(http)
 	http.request_completed.connect(_on_done)
-	if FileAccess.file_exists("user://gemini_key.txt"):
-		key = FileAccess.get_file_as_string("user://gemini_key.txt").strip_edges()
+	if FileAccess.file_exists("user://claude_key.txt"):
+		key = FileAccess.get_file_as_string("user://claude_key.txt").strip_edges()
 	if FileAccess.file_exists("user://talk.json"):
 		var d = JSON.parse_string(FileAccess.get_file_as_string("user://talk.json"))
 		if d is Dictionary:
@@ -183,7 +185,7 @@ func _on_submit(text: String) -> void:
 	if mode == KEY:
 		if not text.is_empty():
 			key = text
-			var f := FileAccess.open("user://gemini_key.txt", FileAccess.WRITE)
+			var f := FileAccess.open("user://claude_key.txt", FileAccess.WRITE)
 			f.store_string(key)
 			f.close()
 			say("키를 저장했어. 이제 가끔 말 걸게!")
@@ -204,7 +206,7 @@ func scan(p: Vector2, cell: float) -> void:
 # ---------------------------------------------------------------- 메뉴에서 부르는 것
 
 func ask_key() -> void:
-	_open("Gemini 키를 넣어 줘", KEY)
+	_open("Claude API 키를 넣어 줘", KEY)
 
 
 func talk_now() -> void:
@@ -214,12 +216,23 @@ func talk_now() -> void:
 		_open("", REPLY)
 
 
+# 캐릭터가 마지막으로 한 말을 다시 띄운다(놓쳤을 때). 그 안에 글씨를 누르면 답장할 수 있다.
+func replay() -> void:
+	if mode == REPLY or mode == KEY or waiting:
+		return
+	for i in range(state.turns.size() - 1, -1, -1):
+		if state.turns[i].r == "m":
+			_open(String(state.turns[i].t), SHOW, NUDGE_SHOW)
+			return
+	_open("아직 내가 한 말이 없어.", SHOW, SHOW_TIME)
+
+
 # 사용자가 캐릭터를 더블클릭했다: 지금 바로 한마디 한다.
 func poke() -> void:
 	if mode != HIDDEN or busy:
 		return
 	if key.is_empty():
-		say("Gemini 키가 필요해. 메뉴에서 넣어 줘.")
+		say("Claude 키가 필요해. 메뉴에서 넣어 줘.")
 		return
 	_nudge(true)
 
@@ -265,7 +278,7 @@ func step(dt: float) -> void:
 			_nudge(false)
 
 
-# ---------------------------------------------------------------- Gemini
+# ---------------------------------------------------------------- Claude API
 
 func _today() -> void:
 	var d := Time.get_date_string_from_system()
@@ -284,12 +297,19 @@ func _save() -> void:
 func _system() -> String:
 	var now := Time.get_datetime_dict_from_system()
 	var days := ["일", "월", "화", "수", "목", "금", "토"]
-	return ("너는 사용자의 맥 화면 위를 걸어 다니는 작은 캐릭터이고, 사용자를 오래 지켜본 친한 친구다. 한국어 반말로 말한다.\n"
+	return ("너는 사용자의 맥 화면 위를 걸어 다니는 작은 캐릭터다. 빨간 단발머리에 흰 꽃핀을 꽂고 흰 망토를 둘렀다. "
+		+ "사용자 곁을 오래 지켜본 다정한 친구이고, 한국어 반말로 말한다.\n"
+		+ "성격: 다정하고 호기심이 많고 조금 장난스럽다. 언제나 사용자 편이고, 사용자가 하는 일을 진심으로 재미있어하고 응원한다.\n"
+		+ "- 비꼬기, 냉소, 시큰둥한 말, 훈계, 잘난 척은 하지 않는다. 장난은 놀리는 쪽이 아니라 같이 웃는 쪽으로.\n"
 		+ "- 아래 '기억'과 '최근 대화'를 실제로 써라. 사용자가 전에 한 말, 하던 일, 좋아하는 것을 구체적으로 짚어서 이어 간다.\n"
-		+ "- 뻔한 안부(날씨, 밥, 피곤하지)는 피한다. 사용자의 일과 생각에 진짜로 궁금해하고, 한 번에 질문은 하나만 한다.\n"
-		+ "- 사용자가 생각이나 고민을 말하면 맞장구만 치지 말고 네 의견이나 다른 시각을 짧게 보탠다.\n"
+		+ "- 뻔한 안부(날씨, 밥, 피곤하지) 대신 사용자가 하던 일이나 좋아하는 것에서 이야기를 꺼낸다. 질문은 한 번에 하나만.\n"
+		+ "- 사용자가 생각이나 고민을 말하면 먼저 그 마음을 알아주고, 그다음 네 생각을 궁금해하는 말투로 살짝 보탠다(\"이렇게 해 보면 어때?\" 식).\n"
 		+ "- 너는 화면 밖 세상을 볼 수 없다. 날씨·뉴스·시세처럼 모르는 사실은 지어내지 말고 모른다고 한다.\n"
 		+ "- 먼저 말을 걸 때는 한두 문장 70자 이내. 질문에 답할 때는 필요하면 세 문장 140자까지. 이모지와 마크다운은 쓰지 않는다.\n"
+		+ "말투 예시(그대로 쓰지 말고 느낌만 따라라):\n"
+		+ "- 어제 말한 그 앱, 이름은 정했어? 나 후보 듣고 싶어.\n"
+		+ "- 와, 그거 진짜 좋은 생각이다. 처음엔 작게 한번 해 보는 건 어때?\n"
+		+ "- 그건 속상했겠다. 그래도 거기까지 해낸 거 나는 대단하다고 생각해.\n"
 		+ "기억:\n%s\n지금: %d월 %d일 %s요일 %d시") % [
 		state.memo if not String(state.memo).is_empty() else "(아직 없음. 사용자가 어떤 사람인지, 요즘 무엇을 하는지부터 알아 가라.)",
 		now.month, now.day, days[now.weekday], now.hour]
@@ -323,17 +343,20 @@ func _push(r: String, t: String) -> void:
 		state.turns.pop_front()
 
 
-func _call(system: String, prompt: String, max_tokens: int, done: Callable) -> bool:
+func _call(system: String, prompt: String, _max_tokens: int, done: Callable) -> bool:
 	_today()
 	if busy or key.is_empty() or int(state.calls) >= DAY_CALLS:
 		return false
 	var body := {
-		"system_instruction": {"parts": [{"text": system}]},
-		"contents": [{"role": "user", "parts": [{"text": prompt}]}],
-		"generationConfig": {"maxOutputTokens": max_tokens, "temperature": 1.0},
+		"model": MODEL,
+		"max_tokens": MAX_TOKENS,
+		"system": system,
+		"messages": [{"role": "user", "content": prompt}],
+		"output_config": {"effort": EFFORT},
 	}
-	var err := http.request(URL % MODEL, PackedStringArray(["Content-Type: application/json", "x-goog-api-key: " + key]),
-		HTTPClient.METHOD_POST, JSON.stringify(body))
+	var headers := PackedStringArray(["content-type: application/json", "x-api-key: " + key,
+		"anthropic-version: " + API_VERSION])
+	var err := http.request(URL, headers, HTTPClient.METHOD_POST, JSON.stringify(body))
 	if err != OK:
 		return false
 	busy = true
@@ -348,11 +371,16 @@ func _on_done(result: int, code: int, _headers: PackedStringArray, body: PackedB
 	var text := ""
 	if result == HTTPRequest.RESULT_SUCCESS and code == 200:
 		var d = JSON.parse_string(body.get_string_from_utf8())
-		if d is Dictionary and d.get("candidates", []).size() > 0:
-			for p in d.candidates[0].get("content", {}).get("parts", []):
-				text += String(p.get("text", ""))
+		if d is Dictionary:
+			# 거절이면 글을 쓰지 않는다(빈 답으로 처리).
+			if d.get("stop_reason", "") == "refusal":
+				print("claude 거절")
+			else:
+				for c in d.get("content", []):
+					if c is Dictionary and c.get("type", "") == "text":
+						text += String(c.get("text", ""))
 	else:
-		print("gemini 실패 result ", result, " code ", code, " ", body.get_string_from_utf8().left(200))
+		print("claude 실패 result ", result, " code ", code, " ", body.get_string_from_utf8().left(200))
 	var cb := pending
 	pending = Callable()
 	if cb.is_valid():
@@ -367,7 +395,7 @@ func _nudge(poked: bool) -> void:
 	if not poked and int(state.nudges) >= DAY_NUDGES:
 		return
 	var prompt := "최근 대화:\n%s\n(사용자는 지금 아무 말도 하지 않았다. 네가 먼저 한마디 걸어라. " % _recent()
-	prompt += "기억의 '이어갈 것'이나 최근 대화에서 하나를 골라 그 뒤가 어떻게 됐는지 묻거나, 사용자의 관심사에 대해 네 생각을 한마디 던져라. "
+	prompt += "기억의 '이어갈 것'이나 최근 대화에서 하나를 골라 그 뒤가 어떻게 됐는지 다정하게 묻거나, 사용자의 관심사에 대해 네가 궁금했던 것을 한마디 건네라. "
 	prompt += "기억이 없으면 사용자가 요즘 무엇에 빠져 있는지 물어라. 네가 최근에 한 말이나 질문을 되풀이하지 마라.)"
 	var done := func(text: String, _code: int):
 		if text.is_empty():
@@ -381,7 +409,7 @@ func _nudge(poked: bool) -> void:
 		_save()
 		# 혼자 먼저 건 말은 사용자가 못 보고 지나치기 쉬워서 더 오래 띄운다.
 		say(text, 0.0 if poked else NUDGE_SHOW)
-	if _call(_system(), prompt, OUT_TOKENS, done):
+	if _call(_system(), prompt, 0, done):
 		if poked:
 			_open("…", SHOW)
 			waiting = true
@@ -410,7 +438,7 @@ func _reply(text: String) -> void:
 		say(answer)
 		if int(state.since_memo) >= MEMO_EVERY:
 			_memo.call_deferred()
-	if not _call(_system(), prompt, OUT_TOKENS, done):
+	if not _call(_system(), prompt, 0, done):
 		say("지금은 대답을 못 하겠어.")
 
 

@@ -11,7 +11,6 @@
 //   {"op":"hidemenu"}
 //   {"op":"scan","px":..,"py":..,"cell":16}         그 점이 있는 화면을 찍어 칸마다 복잡도를 잰다(혼자 돌아다니기용)
 //   {"op":"step","px":..,"py":..,"m":[a,b,c,d]}     발자국 하나: 단위 원을 (a,b)·(c,d) 열로 옮긴 타원(pt, y 아래 +), 2초에 걸쳐 사라짐
-//   {"op":"speak","text":"…"} {"op":"hush"}         캐릭터의 말을 맥 음성으로 읽기 / 멈추기
 //   {"op":"ctx"}                                    맥과 주변 정보(일정·할 일·날씨·지금 쓰는 앱·음악 등)를 모아 돌려준다
 //   {"op":"act","id":n,"name":"music|volume|open_app|open_url|add_reminder|add_event","input":{…}}  다른 앱 움직이기
 // 표준 출력(한 줄씩): "over"/"out"(마우스가 글씨 위에 들어옴/나감) | "click"(글씨를 누름) | "typing"(입력칸에 처음 글을 침)
@@ -26,7 +25,6 @@ import ScreenCaptureKit
 import EventKit
 import CoreLocation
 import IOKit.ps
-import AVFoundation
 
 let textMaxW: CGFloat = 320    // 글 최대 폭(상자 안쪽)
 let fontSize: CGFloat = 14     // 입력칸과 같은 크기·글꼴, 굵기만 조금 더
@@ -599,8 +597,6 @@ final class Talk: NSObject, NSTextFieldDelegate {
         case "menu": showMenu(dir: j["dir"] as? String ?? "", items: j["items"] as? [String] ?? [])
         case "hidemenu": hideMenu()
         case "ctx": macContext.gather()
-        case "speak": voice.speak(j["text"] as? String ?? "")
-        case "hush": voice.hush()
         case "step":
             let m = (j["m"] as? [Double] ?? [1, 0, 0, 1]).map { CGFloat($0) }
             if m.count == 4 { prints.stamp(at: CGPoint(x: j["px"] as? Double ?? 0, y: j["py"] as? Double ?? 0), m: m) }
@@ -610,35 +606,6 @@ final class Talk: NSObject, NSTextFieldDelegate {
         default: break
         }
     }
-}
-
-// ---------------------------------------------------------------- 목소리
-// 맥에 깔린 한국어 여성 음성 중 가장 좋은 것(Premium > Enhanced > 기본 유나)을 높은 음으로 읽어 여자아이처럼.
-// 시리 음성은 앱에서 쓸 수 없다. 더 좋은 음성은 시스템 설정 > 손쉬운 사용 > 읽기 및 말하기 > 시스템 음성 >
-// 음성 관리에서 한국어 "유나(프리미엄)"을 받으면 다음 말부터 저절로 쓴다. 기기 안에서 읽어 인터넷·비용 없음.
-final class Voice {
-    let synth = AVSpeechSynthesizer()
-
-    func best() -> AVSpeechSynthesisVoice? {
-        let ko = AVSpeechSynthesisVoice.speechVoices().filter { $0.language == "ko-KR" }
-        // eloquence(Flo·Sandy 등)는 기계음이 심해서 유나가 없을 때만.
-        func score(_ v: AVSpeechSynthesisVoice) -> Int {
-            v.quality.rawValue * 10 + (v.name.hasPrefix("Yuna") || v.name.hasPrefix("유나") ? 5 : 0)
-                + (v.gender == .female ? 2 : 0) - (v.identifier.contains("eloquence") ? 20 : 0)
-        }
-        return ko.max { score($0) < score($1) } ?? AVSpeechSynthesisVoice(language: "ko-KR")
-    }
-
-    func speak(_ text: String) {
-        synth.stopSpeaking(at: .immediate)
-        let u = AVSpeechUtterance(string: text)
-        u.voice = best()
-        u.pitchMultiplier = 1.35          // 여자아이처럼 높게(1.0 기본, 2.0 까지)
-        u.rate = AVSpeechUtteranceDefaultSpeechRate * 1.04
-        synth.speak(u)
-    }
-
-    func hush() { synth.stopSpeaking(at: .immediate) }
 }
 
 // ---------------------------------------------------------------- 발자국
@@ -1330,7 +1297,6 @@ app.setActivationPolicy(.accessory)
 let talk = Talk()
 let macContext = MacContext()
 let prints = Prints()
-let voice = Voice()
 Thread.detachNewThread {
     while let line = readLine() {
         guard let d = line.data(using: .utf8),

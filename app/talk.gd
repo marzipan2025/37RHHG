@@ -170,6 +170,11 @@ func _events() -> void:
 					"cell": float(f[5]), "busy": Marshalls.base64_to_raw(f[6]),
 					"edge": Marshalls.base64_to_raw(f[7]), "t": Time.get_ticks_msec() / 1000.0}
 				scan_denied = false
+		elif e == "menuclose":
+			menu_open = false
+		elif e.begins_with("menu "):
+			menu_open = false
+			menu_pick.emit(e.substr(5))
 		elif e == "noscan":
 			scan_denied = true
 		elif e == "typing":
@@ -249,6 +254,24 @@ func poke() -> void:
 
 
 signal spoke                   # 캐릭터가 말을 띄웠다(main 이 인사 동작에 쓴다)
+signal menu_pick(id: String)   # 캐릭터 옆 그림 버튼 메뉴에서 하나를 눌렀다
+var menu_open := false
+
+
+# 캐릭터 옆에 그림 버튼 메뉴를 띄운다. items 는 버튼 이름(buttons/btn_<이름>.png).
+func menu_show(items: Array) -> void:
+	# 내보낸 앱에서는 Resources/buttons, 개발 실행에서는 프로젝트의 buttons.
+	var dir := OS.get_executable_path().get_base_dir().path_join("../Resources/buttons").simplify_path()
+	if not DirAccess.dir_exists_absolute(dir):
+		dir = ProjectSettings.globalize_path("res://buttons")
+	menu_open = true
+	sent_anchor = anchor
+	_send({"op": "menu", "dir": dir, "items": items, "x": anchor.x, "y": anchor.y, "fy": feet_y})
+
+
+func menu_hide() -> void:
+	menu_open = false
+	_send({"op": "hidemenu"})
 
 
 func say(text: String, seconds := 0.0) -> void:
@@ -273,8 +296,11 @@ func step(dt: float) -> void:
 			typing = false
 			composing = false
 			waiting = false
+			menu_open = false
 			_start_bubble()
 	_events()
+	if menu_open and mode == HIDDEN:
+		_follow()
 	if mode != HIDDEN:
 		_follow()
 		# 캐릭터나 글씨 위에 마우스가 있거나 캐릭터를 잡고 있는 동안은 사라지는 타이머를 멈춘다.

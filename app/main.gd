@@ -78,7 +78,6 @@ var greet_log := false
 
 # 혼자 돌아다니기
 var wander := false
-var wander_idx := -1
 var w_walking := false
 var w_timer := 0.0
 var w_dir := Vector2.RIGHT
@@ -139,7 +138,9 @@ var cam_lift_dir := Vector3.UP
 
 var snapshot := false
 var talk: Node                 # 말 걸기(talk.gd)
-var model_idx := -1            # 메뉴의 말 모델 토글 자리
+# 말 모델이 Sonnet 이면 머리카락·리본이 파랑(cerulean blue)이 된다. 바뀔 때는 보라를 거쳐 천천히.
+const TINT_TIME := 0.6         # 색이 다 바뀌는 데 걸리는 시간(초)
+var tint_now := -1.0           # 0 빨강 ~ 1 파랑. -1 은 아직 안 정함(처음엔 바로 맞춘다).
 var cam: Camera3D
 
 # 얼굴 덧그리기(face.gdshader). 서기·걷기는 원래 얼굴.
@@ -165,6 +166,7 @@ func _ready() -> void:
 	talk = load("res://talk.gd").new()
 	add_child(talk)
 	talk.spoke.connect(func(): greet_want = true; greet_want_t = 2.0)
+	talk.menu_pick.connect(_on_menu)
 	_setup_menu()
 	var args := OS.get_cmdline_user_args()
 	var si := args.find("--screen")
@@ -174,6 +176,9 @@ func _ready() -> void:
 		_reset_position()
 	if "--wander" in args:
 		_toggle_wander()
+	if "--menu" in args:
+		# 확인용: 1.5초 뒤 그림 버튼 메뉴를 띄우고 그 자리(머리끝, 화면 pt)를 찍는다.
+		get_tree().create_timer(1.5).timeout.connect(func(): _show_menu(); print("menu at ", talk.anchor))
 	if "--greet" in args:
 		# 확인용: 바로 인사하고 진행 상황을 로그에 찍는다.
 		greet_want = true
@@ -777,15 +782,8 @@ func _focus() -> void:
 func _setup_menu() -> void:
 	var menu := NativeMenu.create_menu()
 	popup_menu = menu
-	wander_idx = NativeMenu.add_check_item(menu, "혼자 돌아다니기", func(_tag): _toggle_wander())
-	NativeMenu.add_separator(menu)
-	NativeMenu.add_item(menu, "키보드로 조작하기", func(_tag): _focus())
+	# 메뉴바에는 드물게 쓰는 것만 둔다. 나머지는 캐릭터를 우클릭하면 옆에 뜨는 그림 버튼으로.
 	NativeMenu.add_item(menu, "화면 아래 가운데로", func(_tag): _reset_position())
-	NativeMenu.add_separator(menu)
-	NativeMenu.add_item(menu, "말 걸기", func(_tag): talk.talk_now())
-	NativeMenu.add_item(menu, "방금 한 말 다시 보기", func(_tag): talk.replay())
-	model_idx = NativeMenu.add_item(menu, "", func(_tag): _toggle_model())
-	_model_label()
 	NativeMenu.add_item(menu, "Claude 키 넣기…", func(_tag): talk.ask_key())
 	NativeMenu.add_separator(menu)
 	NativeMenu.add_item(menu, "종료", func(_tag): get_tree().quit())
@@ -795,20 +793,43 @@ func _setup_menu() -> void:
 	print("status indicator ", ind, " feature ", DisplayServer.has_feature(DisplayServer.FEATURE_STATUS_INDICATOR))
 
 
-# 한 자리에서 Haiku ↔ Sonnet 을 오간다. 글자는 누르면 일어날 일(바꿀 모델)을 보여 준다.
-func _toggle_model() -> void:
-	talk.set_sonnet(not talk.sonnet())
-	_model_label()
-	print("model ", "sonnet" if talk.sonnet() else "haiku")
+func _tint_step(dt: float) -> void:
+	var want := 1.0 if talk.sonnet() else 0.0
+	if tint_now == want or face_mat == null:
+		return
+	tint_now = want if tint_now < 0.0 else move_toward(tint_now, want, dt / TINT_TIME)
+	face_mat.set_shader_parameter("tint", smoothstep(0.0, 1.0, tint_now))
 
 
-func _model_label() -> void:
-	NativeMenu.set_item_text(popup_menu, model_idx, "Haiku로 전환" if talk.sonnet() else "Sonnet으로 전환")
+# 캐릭터를 우클릭하면 옆에 그림 버튼 메뉴가 뜬다(말 도우미가 그린다). 토글 버튼은 지금 상태가 아닌 쪽을 보여 준다:
+# 혼자 돌아다니는 중이면 Control(키보드 조작으로), 아니면 Walk!. Sonnet 이면 Haiku, 아니면 Sonnet.
+# What? 은 방금 한 말 다시 보기, Hey! 는 말 걸기.
+func _show_menu() -> void:
+	talk.menu_show(["ctrl" if wander else "walk", "haiku" if talk.sonnet() else "sonnet", "what", "hey"])
+
+
+func _on_menu(id: String) -> void:
+	match id:
+		"walk":
+			if not wander:
+				_toggle_wander()
+		"ctrl":
+			if wander:
+				_toggle_wander()
+			_focus()
+		"sonnet":
+			talk.set_sonnet(true)
+		"haiku":
+			talk.set_sonnet(false)
+		"what":
+			talk.replay()
+		"hey":
+			talk.talk_now()
+	print("menu ", id)
 
 
 func _toggle_wander() -> void:
 	wander = not wander
-	NativeMenu.set_item_checked(popup_menu, wander_idx, wander)
 	w_walking = false
 	w_timer = 0.4
 	print("wander ", wander)
@@ -1155,9 +1176,14 @@ func _input(event: InputEvent) -> void:
 		if event.physical_keycode == KEY_SPACE and jump_u < 0.0:
 			_start_jump(false)
 	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
-		# 메뉴바 아이콘이 노치나 메뉴바 정리 앱에 가려져도 같은 메뉴를 쓸 수 있게
-		NativeMenu.popup(popup_menu, DisplayServer.mouse_get_position())
+		# 우클릭: 옆에 그림 버튼 메뉴를 띄우거나 닫는다.
+		if talk.menu_open:
+			talk.menu_hide()
+		else:
+			_show_menu()
 	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed and talk.menu_open:
+			talk.menu_hide()
 		if event.pressed and event.double_click:
 			# 캐릭터를 더블클릭하면 바로 한마디 한다.
 			talk.poke()
@@ -1225,6 +1251,12 @@ func _process(dt: float) -> void:
 	elif d != Vector2.ZERO or dragging:
 		if not w_leaping:
 			_drop_plan()
+	elif talk.menu_open:
+		# 메뉴가 떠 있는 동안은 돌아다니지 않고 정면을 본다(메뉴가 캐릭터를 쫓아다니지 않게).
+		w_walking = false
+		if not w_leaping:
+			_drop_plan()
+		target_yaw = 0.0
 	elif wander and greet_t < 0.0:
 		_wander_step(dt)
 		if w_walking:
@@ -1322,6 +1354,7 @@ func _process(dt: float) -> void:
 	talk.anchor = (_feet() - Vector2(0, lift + (CHAR_H + 4.0) * px_scale)) / screen_scale + origin
 	talk.feet_y = _feet().y / screen_scale + origin.y
 	_hover_step()
+	_tint_step(dt)
 	talk.step(dt)
 	_face_step(dt, 2 if jump_u >= 0.0 else (1 if run > 0.5 else 0), w < 0.15)
 	_pose(w, run, phase, clock, j, leap)
@@ -1617,6 +1650,34 @@ func _take_snapshots() -> void:
 		await get_tree().process_frame
 		await RenderingServer.frame_post_draw
 		get_viewport().get_texture().get_image().save_png("res://snap/%s.png" % f[0])
+	# 머리·리본 색 바꾸기(Sonnet 일 때 파랑): 바뀌는 곳(초록), 중간, 다 바뀐 얼굴
+	face_mat.set_shader_parameter("debug", false)
+	_face_set(0.0, 0.0, 0.0)
+	for tn in [["tint_mask", 0.0, true], ["tint_half", 0.5, false], ["tint_face", 1.0, false], ["tint_happy", 1.0, false]]:
+		face_mat.set_shader_parameter("tint", tn[1])
+		face_mat.set_shader_parameter("tint_debug", tn[2])
+		if tn[0] == "tint_happy":
+			_face_set(0.0, 1.0, 0.6)
+		await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png("res://snap/%s.png" % tn[0])
+	_face_set(0.0, 0.0, 0.0)
+	cam.size = full
+	cam.position = cam_base
+	for tb in [["tint_body_mask", 0.0, true, 0.0], ["tint_body", 1.0, false, 0.0], ["tint_body_side", 1.0, false, PI * 0.4], ["tint_body_back", 1.0, false, PI]]:
+		face_mat.set_shader_parameter("tint", tb[1])
+		face_mat.set_shader_parameter("tint_debug", tb[2])
+		model.rotation.y = tb[3]
+		_pose(0.0, 0.0, 0.0, 0.0, 0.0)
+		await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png("res://snap/%s.png" % tb[0])
+	face_mat.set_shader_parameter("tint", 0.0)
+	face_mat.set_shader_parameter("tint_debug", false)
+	model.rotation.y = 0.0
+	_pose(0.0, 0.0, 0.0, 0.0, 0.0)
+	cam.size = 46.0 * k
+	cam.position = cam_base + Vector3.UP * (FACE_Y - (FEET_Y - WIN_H * 0.5)) * k
 	# 마우스 조명: 마우스 위치(가슴 기준 pt)별 전신과 얼굴
 	var lights := [["l_near_left", Vector2(-140, -60)], ["l_near_right", Vector2(140, -60)], ["l_top", Vector2(20, -220)],
 		["l_below", Vector2(60, 200)], ["l_far", Vector2(-1200, -300)], ["l_on", Vector2(0, 0)]]

@@ -33,6 +33,13 @@ uniform vec3 head_c = vec3(0.0, 14.0, -12.0);   // 얼굴을 공으로 볼 때 �
 uniform float face_z = 0.0;                // 이보다 앞에 있는 면만 그린다
 uniform bool debug = false;
 
+// 머리카락·리본 색 바꾸기(말 모델이 Sonnet 일 때 파랑). 0 = 원래 빨강, 1 = tint_to.
+// 색상(hue)을 돌리는 방식이라 음영은 그대로 남고, 중간값은 보라를 거쳐 간다.
+uniform float tint = 0.0;
+uniform vec3 tint_from = vec3(0.91, 0.39, 0.39);     // 원래 머리 빨강(텍스처에서 잰 값)
+uniform vec3 tint_to = vec3(0.25, 0.52, 0.95);       // 밝은 cerulean blue(원래 빨강과 밝기가 비슷하게)
+uniform bool tint_debug = false;                     // 바뀌는 곳을 초록으로
+
 varying vec3 hp;
 varying vec3 hn;
 
@@ -40,6 +47,24 @@ void vertex() {
 	vec4 w = MODEL_MATRIX * vec4(VERTEX, 1.0);
 	hp = (head_inv * w).xyz * 100.0;
 	hn = normalize(mat3(head_inv) * (mat3(MODEL_MATRIX) * NORMAL));
+}
+
+vec3 rgb2hsv(vec3 c) {
+	vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+	vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+	vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+	float d = q.x - min(q.w, q.y);
+	return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + 1e-10)), d / (q.x + 1e-10), q.x);
+}
+
+vec3 hsv2rgb(vec3 c) {
+	vec3 p = abs(fract(c.xxx + vec3(1.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
+	return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
+}
+
+// 색상 차이(-0.5 ~ 0.5 바퀴)
+float hue_diff(float a, float b) {
+	return fract(a - b + 0.5) - 0.5;
 }
 
 float cover(float d) {
@@ -125,6 +150,48 @@ void fragment() {
 	hair = hair || (c.r > 0.5 && c.g < 0.55 * c.r && hp.y > eye_c.y + eye_s.y * 0.95);
 	// 눈 자리는 오목해서 안쪽 면이 옆·아래를 본다. 그래서 면 방향 조건을 넉넉히 둔다.
 	bool front = hn.z > -0.35 && hp.z > face_z;
+	// 머리카락·리본 색 바꾸기. 채도 높은 빨강만 고른다(피부·볼터치는 채도가 낮고, 가방·신발은 갈색).
+	// 눈동자와 입도 붉어서, 눈·입 둘레에서는 위의 머리카락 판정이 참인 곳만 바꾼다.
+	if (tint > 0.001 || tint_debug) {
+		// 이 렌더러(GL Compatibility)에서는 텍스처 색이 화면 색 그대로 들어온다(선형 변환 없음, 재서 확인).
+		vec3 h = rgb2hsv(c);
+		vec3 hf = rgb2hsv(tint_from);
+		vec3 ht = rgb2hsv(tint_to);
+		float w = (1.0 - smoothstep(0.045, 0.075, abs(hue_diff(h.x, hf.x))))
+			* smoothstep(0.40, 0.50, h.y) * smoothstep(0.18, 0.30, h.z);
+		vec2 ea = (hp.xy - eye_c) / eye_s;
+		vec2 eb = (hp.xy - vec2(-eye_c.x, eye_c.y)) / eye_s;
+		bool eye_zone = front && min(length(ea), length(eb)) < 1.4;
+		bool mouth_zone = front && length((hp.xy - mouth_c) / vec2(mouth_s.x * 1.4, 3.2)) < 1.0;
+		if (mouth_zone || (eye_zone && !hair)) {
+			w = 0.0;
+		} else if (front && min(length(ea), length(eb)) < 2.0) {
+			// 눈 둘레의 쌍꺼풀 선·속눈썹 그늘은 흐린 적갈색이라 빼고, 또렷한 앞머리만 바꾼다.
+			w *= smoothstep(0.48, 0.56, h.y) * smoothstep(0.55, 0.68, h.z);
+		}
+		if (tint_debug) {
+			c = mix(c, vec3(0.0, 1.0, 0.0), w * 0.8);
+		} else {
+			// 기준 빨강이 정확히 tint_to 가 되게 옮긴다. 채도는 차이를 반만 남겨 그늘이 원색으로 뜨지 않게.
+			float dh = hue_diff(ht.x, hf.x);
+			vec3 o = vec3(fract(h.x + dh * tint),
+				clamp(mix(h.y, ht.y + (h.y - hf.y) * 0.5, tint), 0.0, 1.0),
+				h.z * mix(1.0, ht.z / hf.z, tint));
+			vec3 oc = hsv2rgb(o);
+			// 보라·파랑은 같은 명도값이라도 어둡게 보인다. 바뀌는 동안 어두워졌다 밝아지지 않게,
+			// 눈에 보이는 밝기를 처음과 끝 사이로 곧게 잇는다.
+			vec3 lw = vec3(0.299, 0.587, 0.114);
+			vec3 end = hsv2rgb(vec3(fract(h.x + dh), clamp(ht.y + (h.y - hf.y) * 0.5, 0.0, 1.0), h.z * ht.z / hf.z));
+			float want = mix(dot(c, lw), dot(end, lw), tint);
+			oc *= want / max(dot(oc, lw), 1e-4);
+			// 밝히다 넘치는 채널은 흰색 쪽으로 덜어 밝기를 지킨다.
+			float top = max(oc.r, max(oc.g, oc.b));
+			if (top > 1.0) {
+				oc = mix(vec3(want), oc, (1.0 - want) / max(top - want, 1e-4));
+			}
+			c = mix(c, oc, w);
+		}
+	}
 	if (debug && front && hair) {
 		c = mix(c, vec3(0.0, 1.0, 0.0), 0.6);
 	}

@@ -214,7 +214,7 @@ func talk_now() -> void:
 		_open("", REPLY)
 
 
-# 사용자가 캐릭터를 건드렸다(마우스 지그재그): 지금 바로 한마디 한다.
+# 사용자가 캐릭터를 더블클릭했다: 지금 바로 한마디 한다.
 func poke() -> void:
 	if mode != HIDDEN or busy:
 		return

@@ -289,52 +289,12 @@ func _light_set(v: Vector2, blend: float) -> void:
 	shadow.position.z = off.y
 
 
-# 캐릭터 위에서 마우스를 좌우로 두세 번 흔들면 말을 건다.
-const ZIG_STROKE := 14.0       # 한 번 흔든 것으로 치는 최소 좌우 이동(pt)
-const ZIG_TURNS := 3           # 방향을 이만큼 바꾸면 발동
-const ZIG_TIME := 1.2          # 이 시간 안에 해야 한다
-var zig_x := 0.0
-var zig_dir := 0
-var zig_run := 0.0             # 지금 방향으로 간 거리(pt)
-var zig_turns := 0
-var zig_t := 0.0
-var zig_cool := 0.0
-
-
-func _zigzag_step(dt: float) -> void:
-	zig_cool -= dt
-	zig_t += dt
+# 마우스가 캐릭터 위에 있거나 캐릭터를 잡고 있으면 말이 사라지는 타이머를 멈춘다.
+func _hover_step() -> void:
 	var m := Vector2(DisplayServer.mouse_get_position())
 	var feet := _feet()
 	var body := Rect2(feet.x - 44.0 * px_scale, feet.y - lift - CHAR_H * px_scale, 88.0 * px_scale, (CHAR_H + 6.0) * px_scale)
-	var dx := (m.x - zig_x) / px_scale
-	zig_x = m.x
 	talk.hold = dragging or body.has_point(m)
-	var inside := body.has_point(m) and not dragging and Input.get_mouse_button_mask() == 0
-	if not inside or (zig_turns > 0 and zig_t > ZIG_TIME):
-		zig_turns = 0
-		zig_run = 0.0
-		zig_dir = 0
-		if not inside:
-			return
-	if absf(dx) < 0.01:
-		return
-	var d := 1 if dx > 0.0 else -1
-	if d == zig_dir or zig_dir == 0:
-		zig_dir = d
-		zig_run += absf(dx)
-		return
-	# 방향이 바뀌었다. 직전에 충분히 갔으면 한 번 흔든 것으로 센다.
-	if zig_run >= ZIG_STROKE:
-		if zig_turns == 0:
-			zig_t = 0.0
-		zig_turns += 1
-	zig_dir = d
-	zig_run = absf(dx)
-	if zig_turns >= ZIG_TURNS and zig_cool <= 0.0:
-		zig_turns = 0
-		zig_cool = 4.0
-		talk.poke()
 
 
 func _light_step(dt: float) -> void:
@@ -1183,6 +1143,9 @@ func _input(event: InputEvent) -> void:
 		# 메뉴바 아이콘이 노치나 메뉴바 정리 앱에 가려져도 같은 메뉴를 쓸 수 있게
 		NativeMenu.popup(popup_menu, DisplayServer.mouse_get_position())
 	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed and event.double_click:
+			# 캐릭터를 더블클릭하면 바로 한마디 한다.
+			talk.poke()
 		dragging = event.pressed
 		drag_mouse = Vector2(DisplayServer.mouse_get_position())
 		drag_win = win_pos
@@ -1343,7 +1306,7 @@ func _process(dt: float) -> void:
 	# 말풍선 도우미는 화면 pt(왼쪽 위 원점)로 받는다.
 	talk.anchor = (_feet() - Vector2(0, lift + (CHAR_H + 4.0) * px_scale)) / screen_scale + origin
 	talk.feet_y = _feet().y / screen_scale + origin.y
-	_zigzag_step(dt)
+	_hover_step()
 	talk.step(dt)
 	_face_step(dt, 2 if jump_u >= 0.0 else (1 if run > 0.5 else 0), w < 0.15)
 	_pose(w, run, phase, clock, j, leap)

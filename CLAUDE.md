@@ -85,6 +85,7 @@
 - 켜면 캐릭터의 말(`say`, What 다시 띄우기, 할 일·일정 확인)을 읽는다. "…"과 사용자 입력은 안 읽는다. 새 말이 오면 읽던 것은 끊고 마지막 것만 읽는다.
 - 엔진은 Supertonic 3(로컬 ONNX), 목소리 F1, steps 8, speed 1.05. `app/helper/tts_daemon.py`(빌드가 Resources 로 복사)를 22SUTO 의 파이썬 환경(`~/Library/Application Support/22SUTO/venv/bin/python -I`)으로 띄워 모델(`~/.cache/supertonic3`, 385MB)을 빌려 쓴다. 22SUTO 가 없는 맥(회사 맥 등)에서는 조용히 안 읽는다.
 - 도우미의 `Voice`가 wav 를 받아 AVAudioEngine 으로 재생하면서 음만 +450 cent(`voicePitch`, 반음 4.5개. 2026-11-15 F5+300 → F1+450) 올려 여자아이처럼(빠르기는 그대로). 한 줄 만드는 데 0.7~0.95초(이 맥 실측), 모델 올리기 0.5초. Mute 를 누르면 엔진 프로세스를 내려 메모리(~400MB)를 비운다.
+- 읽는 동안(만드는 1초 포함)은 말풍선이 사라지지 않는다(`talk.voicing`). 도우미가 스피커로 다 내보낸 뒤(`.dataPlayedBack`) 또는 못 읽을 때 "voicedone" 을 주면 풀리고, 표시 시간이 이미 지났으면 1초 뒤 닫힌다. 30초 넘게 소식이 없으면 그냥 푼다(`SPEAK_MAX`).
 - 2026-11-14 처음엔 맥 기본 음성(AVSpeechSynthesizer 유나, 프리미엄 포함)을 음 높여 썼는데 어색해서 뺐다.
 
 ### 프레임 (2026-11-14)

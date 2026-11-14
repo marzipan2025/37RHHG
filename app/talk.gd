@@ -97,6 +97,8 @@ const TOOLS := [
 			"message": {"type": "string", "description": "그때 할 말(반말, 짧게)"}},
 			"required": ["minutes", "message"]}},
 ]
+const SPEAK_MAX := 30.0        # 읽는 중 표시가 이보다 오래 가면(도우미가 죽는 등) 그냥 푼다
+var voicing := 0.0             # >0 이면 읽는 중(남은 안전 시간, 초)
 var last_err := ""             # 방금 실패의 까닭: credit(크레딧 바닥) | key(키 틀림) | busy(붐빔) | ""
 var last_tools: Array = []     # 방금 받은 응답의 tool_use 들
 var acts := {}                 # 도우미에 보낸 동작 id → {"say": Claude 가 쓴 한마디}
@@ -223,6 +225,11 @@ func _events() -> void:
 		elif e.begins_with("menu "):
 			menu_open = false
 			menu_pick.emit(e.substr(5))
+		elif e == "voicedone":
+			if voicing > 0.0:
+				voicing = 0.0
+				# 다 읽었는데 표시 시간이 이미 지났으면 1초 더 두고 닫는다.
+				show_left = maxf(show_left, 1.0)
 		elif e.begins_with("acted "):
 			var f := e.split(" ")
 			if f.size() >= 3:
@@ -325,11 +332,14 @@ func set_voice(on: bool) -> void:
 		speak("이제 내 목소리도 들려줄게!")
 	else:
 		_send({"op": "voiceoff"})
+		voicing = 0.0
 
 
+# 읽는 동안(만드는 1초 남짓 포함)은 말풍선이 사라지지 않는다. 도우미가 "voicedone" 을 주면 풀린다.
 func speak(text: String) -> void:
 	if voice() and not text.is_empty() and text != "…":
 		_send({"op": "speak", "text": text})
+		voicing = SPEAK_MAX
 
 
 # 캐릭터가 마지막으로 한 말을 다시 띄운다(놓쳤을 때). 그 안에 글씨를 누르면 답장할 수 있다.
@@ -411,7 +421,9 @@ func step(dt: float) -> void:
 	if mode != HIDDEN:
 		_follow()
 		# 캐릭터나 글씨 위에 마우스가 있거나 캐릭터를 잡고 있는 동안은 사라지는 타이머를 멈춘다.
-		if mode == SHOW and show_left > 0.0 and not hold and not text_hover:
+		if voicing > 0.0:
+			voicing = maxf(voicing - dt, 0.0)
+		if mode == SHOW and show_left > 0.0 and not hold and not text_hover and voicing <= 0.0:
 			show_left -= dt
 			if show_left <= 0.0:
 				_close()

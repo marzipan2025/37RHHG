@@ -18,6 +18,7 @@
 //                   | "esc"(Esc, 또는 아무것도 안 친 채 5초) | "submit <base64 글>"
 //                   | "menu <버튼 이름>"(메뉴 버튼을 누름) | "menuclose"(바깥을 눌렀거나 한동안 안 써서 닫힘)
 //                   | "ctx <base64 글>"(맥과 주변 정보, 한 줄에 하나씩, 한국어)
+//                   | "voicedone"(읽던 말을 다 읽음, 또는 못 읽음)
 //                   | "acted <id> ok|fail <base64 한마디>"(act 결과)
 //                   | "grid <열> <행> <화면 x> <화면 y> <칸 pt> <base64 busy> <base64 edge>" | "noscan"(권한 없음·실패)
 // 표준 입력이 닫히면(앱이 끝나면) 같이 끝난다.
@@ -672,17 +673,20 @@ final class Voice {
             let line = String(decoding: buf[buf.startIndex..<nl], as: UTF8.self)
             buf.removeSubrange(buf.startIndex...nl)
             let f = line.split(separator: " ")
-            if line == "noengine" { dead = true; off(); return }
+            if line == "noengine" { dead = true; off(); emit("voicedone"); return }
             guard f.count == 2, let id = Int(f[1]) else { continue }
             let url = file(id)
-            if f[0] == "ok" && id == latest { play(url) } else { try? FileManager.default.removeItem(at: url) }
+            if f[0] == "ok" && id == latest { play(url, id) } else {
+                try? FileManager.default.removeItem(at: url)
+                if id == latest { emit("voicedone") }
+            }
         }
     }
 
     func file(_ id: Int) -> URL { dir.appendingPathComponent("\(id).wav") }
 
     func speak(_ text: String) {
-        guard start(), let input else { return }
+        guard start(), let input else { emit("voicedone"); return }
         nextId += 1
         latest = nextId
         player.stop()
@@ -692,8 +696,9 @@ final class Voice {
         input.write(d)
     }
 
-    func play(_ url: URL) {
-        guard let f = try? AVAudioFile(forReading: url) else { return }
+    // 다 읽으면(스피커로 나간 뒤) "voicedone" 을 낸다. 새 말에 끊긴 것은 내지 않는다.
+    func play(_ url: URL, _ id: Int) {
+        guard let f = try? AVAudioFile(forReading: url) else { emit("voicedone"); return }
         if wired != f.processingFormat {
             engine.connect(player, to: pitch, format: f.processingFormat)
             engine.connect(pitch, to: engine.mainMixerNode, format: f.processingFormat)
@@ -701,7 +706,10 @@ final class Voice {
         }
         if !engine.isRunning { try? engine.start() }
         player.stop()
-        player.scheduleFile(f, at: nil) { try? FileManager.default.removeItem(at: url) }
+        player.scheduleFile(f, at: nil, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            try? FileManager.default.removeItem(at: url)
+            DispatchQueue.main.async { if self?.latest == id { emit("voicedone") } }
+        }
         player.play()
     }
 

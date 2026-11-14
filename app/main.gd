@@ -139,6 +139,7 @@ var cam_lift_dir := Vector3.UP
 
 var snapshot := false
 var talk: Node                 # 말 걸기(talk.gd)
+var model_idx := -1            # 메뉴의 말 모델 토글 자리
 var cam: Camera3D
 
 # 얼굴 덧그리기(face.gdshader). 서기·걷기는 원래 얼굴.
@@ -783,6 +784,8 @@ func _setup_menu() -> void:
 	NativeMenu.add_separator(menu)
 	NativeMenu.add_item(menu, "말 걸기", func(_tag): talk.talk_now())
 	NativeMenu.add_item(menu, "방금 한 말 다시 보기", func(_tag): talk.replay())
+	model_idx = NativeMenu.add_item(menu, "", func(_tag): _toggle_model())
+	_model_label()
 	NativeMenu.add_item(menu, "Claude 키 넣기…", func(_tag): talk.ask_key())
 	NativeMenu.add_separator(menu)
 	NativeMenu.add_item(menu, "종료", func(_tag): get_tree().quit())
@@ -790,6 +793,17 @@ func _setup_menu() -> void:
 	indicator = ind
 	DisplayServer.status_indicator_set_menu(ind, menu)
 	print("status indicator ", ind, " feature ", DisplayServer.has_feature(DisplayServer.FEATURE_STATUS_INDICATOR))
+
+
+# 한 자리에서 Haiku ↔ Sonnet 을 오간다. 글자는 누르면 일어날 일(바꿀 모델)을 보여 준다.
+func _toggle_model() -> void:
+	talk.set_sonnet(not talk.sonnet())
+	_model_label()
+	print("model ", "sonnet" if talk.sonnet() else "haiku")
+
+
+func _model_label() -> void:
+	NativeMenu.set_item_text(popup_menu, model_idx, "Haiku로 전환" if talk.sonnet() else "Sonnet으로 전환")
 
 
 func _toggle_wander() -> void:

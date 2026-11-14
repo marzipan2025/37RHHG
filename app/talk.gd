@@ -4,7 +4,8 @@ extends Node
 ## 토큰을 아끼려고 한 번 부를 때 메모와 최근 몇 마디만 보내고, 하루 호출 횟수에 상한을 둔다.
 ## API 키는 저장소에 넣지 않는다. 메뉴의 "Claude 키 넣기…"로 넣으면 user://claude_key.txt 에 둔다.
 
-const MODEL := "claude-haiku-5-5"
+const HAIKU := "claude-haiku-5-5"    # 기본. 싸고 빠르다.
+const SONNET := "claude-sonnet-5-5"  # 메뉴에서 바꿀 수 있다. 말이 더 깊지만 토큰당 20배.
 const URL := "https://api.anthropic.com/v1/messages"
 const API_VERSION := "2026-10-21"
 const EFFORT := "low"          # 짧은 잡담이라 생각은 조금만(비용·속도)
@@ -216,6 +217,16 @@ func talk_now() -> void:
 		_open("", REPLY)
 
 
+# 말 모델: 메뉴의 한 자리 토글로 Haiku ↔ Sonnet. 고른 것은 talk.json 에 남는다.
+func sonnet() -> bool:
+	return state.get("model", "haiku") == "sonnet"
+
+
+func set_sonnet(on: bool) -> void:
+	state.model = "sonnet" if on else "haiku"
+	_save()
+
+
 # 캐릭터가 마지막으로 한 말을 다시 띄운다(놓쳤을 때). 그 안에 글씨를 누르면 답장할 수 있다.
 func replay() -> void:
 	if mode == REPLY or mode == KEY or waiting:
@@ -348,7 +359,7 @@ func _call(system: String, prompt: String, _max_tokens: int, done: Callable) -> 
 	if busy or key.is_empty() or int(state.calls) >= DAY_CALLS:
 		return false
 	var body := {
-		"model": MODEL,
+		"model": SONNET if sonnet() else HAIKU,
 		"max_tokens": MAX_TOKENS,
 		"system": system,
 		"messages": [{"role": "user", "content": prompt}],

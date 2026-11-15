@@ -263,14 +263,40 @@ final class TextView: NSView {
     }
     // over/out 은 Talk.checkHover 가 실제 마우스 위치로 판단한다(창이 움직이거나 숨으면 추적 영역 이벤트가 안 와서
     // "over" 에 갇혀 말풍선이 안 닫히던 문제).
-    override func mouseDown(with event: NSEvent) { emit("click") }
+    // 말풍선을 누르면 답장 입력칸이 뜬다. 지금(사용자가 누른 순간)이어야 macOS 가 이 도우미를 앞으로 올려 준다
+    // (macOS 14 부터 사용자 입력 없이 앞으로 오기는 거절된다). 앞에 있어야 ⌘V 가 입력칸으로 온다.
+    override func mouseDown(with event: NSEvent) { bringForward(); emit("click") }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+// 이 도우미를 맨 앞 앱으로. 사용자가 이 도우미의 창을 누른 순간에 불러야 받아들여진다.
+func bringForward() {
+    if #available(macOS 14, *) { NSApp.activate() } else { NSApp.activate(ignoringOtherApps: true) }
 }
 
 final class InputPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
     override func cancelOperation(_ sender: Any?) { emit("esc") }
+    static func shortcut(_ e: NSEvent) -> String? {
+        let byCode: [UInt16: String] = [9: "v", 8: "c", 7: "x", 0: "a", 6: "z"]
+        let hangul = ["ㅍ": "v", "ㅊ": "c", "ㅌ": "x", "ㅁ": "a", "ㅋ": "z"]
+        if let k = byCode[e.keyCode] { return k }
+        for c in [e.characters, e.charactersIgnoringModifiers].compactMap({ $0?.lowercased() }) {
+            if ["v", "c", "x", "a", "z"].contains(c) { return c }
+            if let h = hangul[c] { return h }
+        }
+        return nil
+    }
+    // 입력칸의 글 편집기. 패널이 키 창이 되기 전에 입력칸을 고르면 편집기가 아직 안 붙어 있어서(첫 응답자가
+    // 입력칸 자체) ⌘V 가 갈 곳이 없었다. 그때는 입력칸을 다시 골라 편집기를 붙인다.
+    func editor() -> NSTextView? {
+        if let ed = firstResponder as? NSTextView { return ed }
+        guard let f = (firstResponder as? NSTextField) ?? contentView?.subviews.lazy.flatMap({ [$0] + $0.subviews })
+                .compactMap({ $0 as? NSTextField }).first(where: { $0.isEditable }) else { return nil }
+        makeFirstResponder(f)
+        return f.currentEditor() as? NSTextView
+    }
     // 한글 조합 중에는 글이 바뀐 알림이 늦을 수 있어서, 키를 누르는 것 자체도 입력 시작으로 본다.
     var onKey: (() -> Void)?
     // 메뉴가 없는 도우미라 ⌘V·⌘C·⌘X·⌘A·⌘Z 가 저절로 되지 않는다(예전의 performKeyEquivalent 로 넘기기는
@@ -278,8 +304,12 @@ final class InputPanel: NSPanel {
     // ⌘V 는 그림이 있으면 그림을 먼저 받는다(onPasteImage 가 true 를 돌려주면 끝).
     var onPasteImage: (() -> Bool)?
     override func sendEvent(_ e: NSEvent) {
+        // 저절로 뜬 입력칸(업데이트·할 일 확인)은 앞으로 못 올라와 있을 수 있다. 입력칸을 누르면 그때 올린다.
+        if e.type == .leftMouseDown, !NSApp.isActive { bringForward() }
+        // 글자로 고르면 안 된다: 한글 입력 상태에서는 V 키가 "ㅍ"으로 와서 "v" 와 안 맞았다(⌘V 가 안 되던 진짜 까닭).
+        // 키 자리(keyCode)로 고르고, 글자(characters)는 보조로 본다.
         if e.type == .keyDown, e.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
-           let ch = e.charactersIgnoringModifiers?.lowercased(), let ed = firstResponder as? NSTextView {
+           let ch = Self.shortcut(e), let ed = editor() {
             switch ch {
             case "v":
                 onKey?()
@@ -376,7 +406,10 @@ final class ImageButton: NSView {
         let inside = bounds.contains(convert(event.locationInWindow, from: nil))
         down = false
         refresh()
-        if inside { onClick?(name) }
+        if inside {
+            if name == "hey" { bringForward() }      // Hey! 는 바로 입력칸을 연다
+            onClick?(name)
+        }
     }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
@@ -581,6 +614,10 @@ final class Talk: NSObject, NSTextFieldDelegate {
             let front = NSWorkspace.shared.frontmostApplication
             prevApp = front?.processIdentifier == getpid() ? nil : front
         }
+        // ⌘V 같은 ⌘ 단축키는 macOS 가 "맨 앞 앱"에 보낸다. 패널이 앱을 앞으로 안 올리면(nonactivating) 글자는
+        // 들어와도 ⌘V 는 원래 쓰던 앱(브라우저 등)으로 가 버린다. 입력칸을 열 때 이 도우미를 앞으로 올린다.
+        // 닫을 때 hideInput 이 원래 앱(prevApp)을 다시 앞으로 돌려준다.
+        bringForward()
         inputPanel.makeKeyAndOrderFront(nil)
         inputPanel.makeFirstResponder(field)
         place()

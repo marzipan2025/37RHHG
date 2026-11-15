@@ -328,8 +328,8 @@ final class InputPanel: NSPanel {
 }
 
 // ---------------------------------------------------------------- 캐릭터 옆 그림 버튼 메뉴
-let menuBtn = NSSize(width: 75, height: 75.0 * 100.0 / 292.0)   // 버튼 그림(292×100)을 이 크기(pt)로
-let menuGap: CGFloat = 6
+let menuBtn = NSSize(width: 67.5, height: 67.5 * 100.0 / 292.0)   // 버튼 그림(292×100)을 이 크기(pt)로(v0.1.6: 75→67.5, 90%)
+let menuGap: CGFloat = 5.4
 let menuPad: CGFloat = 10       // 커지는 버튼과 그림자가 잘리지 않게 두는 둘레 여백
 let menuOffset: CGFloat = 57    // 캐릭터 가운데에서 버튼 가장자리까지
 let menuIdleTime: TimeInterval = 8.0

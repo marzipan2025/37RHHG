@@ -251,8 +251,14 @@ func _build_scene() -> void:
 	# 그래서 고친 메시를 따로 만들어 두고, 인사하는 동안만 바꿔 낀다(팔이 내려와 있을 때 바꾸므로 티가 안 난다).
 	body_mi = inst.find_children("*", "MeshInstance3D", true, false)[0]
 	body_mesh = body_mi.mesh
-	_fix_arm_weights(inst)
-	greet_mesh = body_mi.mesh
+	if "--dump-mesh" in OS.get_cmdline_user_args():
+		_dump_mesh()
+		get_tree().quit()
+		return
+	greet_mesh = _load_arm_mesh()
+	if greet_mesh == null:
+		_fix_arm_weights(inst)      # 예전 방식(미리 만든 파일이 없을 때만)
+		greet_mesh = body_mi.mesh
 	body_mi.mesh = body_mesh
 	_matte(inst)   # 재질은 MeshInstance 쪽 덮어쓰기라 메시를 바꿔 껴도 그대로다
 	_cache_bones()
@@ -331,6 +337,8 @@ func _light_step(dt: float) -> void:
 # 그래서 꺾이는 곳(사타구니 고정점)이 관절보다 조금 아래로 내려오고 경계가 분명해진다.
 const LEG_SHIFT := 0.03        # 다리를 안쪽으로 옮기는 양(m, 모델 기준)
 var leg_shift := Vector3.ZERO  # 위 값을 골반 뼈 좌표로 바꾼 것
+const SKIRT_FOLLOW := 0.55     # 치마·가방이 다리를 따르는 비율
+const THIGH_R := 0.088         # 허벅지 뼈에서 이 거리 안은 허벅지 살
 const LEG_FULL := 0.44         # 모델 높이(m)
 const LEG_NONE := 0.50
 
@@ -359,8 +367,19 @@ func _fix_leg_weights(inst: Node) -> void:
 				out.surface_set_material(sf, src.surface_get_material(sf))
 				continue
 			var per: int = we.size() / v.size()
+			# 치마·가방·옷자락은 허벅지 뼈에서 10cm 넘게 떨어져 있다(허벅지 살은 9.5cm 안, 잰 값). 리깅은 치맛단을
+			# 허벅지에 거의 그대로(0.9) 묶어 놓아서, 점프로 다리를 접으면 치마가 뒤집히고 가방이 찢어졌다.
+			# 허벅지 살이 아닌 점은 다리를 SKIRT_FOLLOW 만큼만 따르게 하고 나머지는 골반으로 옮긴다.
+			var to_mesh: Transform3D = model.global_transform.affine_inverse() * skel.global_transform
+			var axes := []
+			for sd in ["Left", "Right"]:
+				axes.append([to_mesh * skel.get_bone_global_rest(skel.find_bone(sd + "UpLeg")).origin,
+					to_mesh * skel.get_bone_global_rest(skel.find_bone(sd + "Leg")).origin])
 			for k in v.size():
 				var keep := 1.0 - smoothstep(LEG_FULL, LEG_NONE, v[k].y)
+				if v[k].y > 0.3:
+					var dl := minf(_seg_dist(v[k], axes[0][0], axes[0][1]), _seg_dist(v[k], axes[1][0], axes[1][1]))
+					keep *= lerpf(1.0, SKIRT_FOLLOW, smoothstep(THIGH_R, THIGH_R + 0.016, dl))
 				if keep >= 1.0:
 					continue
 				var moved := 0.0
@@ -1657,6 +1676,10 @@ func _take_snapshots() -> void:
 		["look_right", 0.0, 0.0, 0.0, 0.0, 0.0, -LOOK_MAX],
 	]
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("res://snap"))
+	if "--arm" in OS.get_cmdline_user_args():
+		await _arm_snapshots()
+		get_tree().quit()
+		return
 	# 인사 자세(손을 양쪽 끝까지 흔든 두 장)
 	body_mi.mesh = greet_mesh
 	for gw in [["greet_a", -1.0], ["greet_b", 1.0]]:
@@ -1869,3 +1892,102 @@ func _fps_step(dt: float, w: float) -> void:
 	var want := FPS_IDLE if calm_t > FPS_CALM else FPS_ACTIVE
 	if Engine.max_fps != want:
 		Engine.max_fps = want
+
+
+# 확인용(--snapshot --arm): 팔 둘레만 크게. 쉬는 자세를 평소 메시·팔 든 메시로(음영이 같아야 한다),
+# 인사·점프를 여러 각도로. app/snap/arm_*.png
+func _arm_snapshots() -> void:
+	get_window().size = Vector2i(roundi(WIN_W * 4), roundi(WIN_H * 4))
+	cam.size = 62.0 * k
+	cam.position = cam_base + Vector3.UP * (50.0 - (FEET_Y - WIN_H * 0.5)) * k
+	# [이름, 메시(0 평소 1 팔 든), yaw, 인사(0/1), 흔들기, 점프]
+	var shots := [
+		["arm_rest_body", 0, 0.0, 0.0, 0.0, 0.0], ["arm_rest_greet", 1, 0.0, 0.0, 0.0, 0.0],
+		["arm_rest_body_l", 0, 0.7, 0.0, 0.0, 0.0], ["arm_rest_greet_l", 1, 0.7, 0.0, 0.0, 0.0],
+		["arm_rest_body_r", 0, -0.7, 0.0, 0.0, 0.0], ["arm_rest_greet_r", 1, -0.7, 0.0, 0.0, 0.0],
+		["arm_greet_a", 1, 0.0, 1.0, -1.0, 0.0], ["arm_greet_b", 1, 0.0, 1.0, 1.0, 0.0],
+		["arm_greet_side", 1, -0.6, 1.0, -1.0, 0.0], ["arm_greet_side2", 1, 0.6, 1.0, 0.0, 0.0],
+		["arm_greet_back", 1, PI, 1.0, 0.0, 0.0],
+		["arm_jump", 1, 0.0, 0.0, 0.0, 1.0], ["arm_jump_l", 1, 0.5, 0.0, 0.0, 1.0], ["arm_jump_r", 1, -0.5, 0.0, 0.0, 1.0],
+		["arm_jump_back", 1, PI, 0.0, 0.0, 1.0],
+	]
+	for s in shots:
+		body_mi.mesh = greet_mesh if s[1] == 1 else body_mesh
+		model.rotation.y = s[2]
+		greet = s[3]
+		greet_wave = s[4]
+		look = 0.0
+		_pose(0.0, 0.0, 0.0, 0.0, s[5])
+		await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png("res://snap/%s.png" % s[0])
+
+
+# ---------------------------------------------------------------- 팔 든 메시(미리 만든 것)
+
+# tools/arm_mesh.py 가 읽을 재료를 user://arm_src.bin·json·png 로 남긴다(다리 가중치를 고친 뒤의 메시).
+# godot --headless --path app -- --dump-mesh
+func _dump_mesh() -> void:
+	var a := body_mesh.surface_get_arrays(0)
+	var v: PackedVector3Array = a[Mesh.ARRAY_VERTEX]
+	var n: PackedVector3Array = a[Mesh.ARRAY_NORMAL]
+	var uv: PackedVector2Array = a[Mesh.ARRAY_TEX_UV]
+	var idx: PackedInt32Array = a[Mesh.ARRAY_INDEX]
+	var bo = a[Mesh.ARRAY_BONES]
+	var we: PackedFloat32Array = a[Mesh.ARRAY_WEIGHTS]
+	var f := FileAccess.open("user://arm_src.bin", FileAccess.WRITE)
+	f.store_32(v.size())
+	f.store_32(idx.size())
+	f.store_32(we.size() / v.size())
+	f.store_buffer(v.to_byte_array())
+	f.store_buffer(n.to_byte_array())
+	f.store_buffer(uv.to_byte_array())
+	f.store_buffer(idx.to_byte_array())
+	var bi := PackedInt32Array()
+	for b in bo:
+		bi.append(int(b))
+	f.store_buffer(bi.to_byte_array())
+	f.store_buffer(we.to_byte_array())
+	f.close()
+	var to_mesh: Transform3D = model.global_transform.affine_inverse() * skel.global_transform
+	var rest := {}
+	for b in skel.get_bone_count():
+		var o := to_mesh * skel.get_bone_global_rest(b).origin
+		rest[skel.get_bone_name(b)] = [o.x, o.y, o.z]
+	var binds := []
+	for b in body_mi.skin.get_bind_count():
+		binds.append(body_mi.skin.get_bind_name(b))
+	var j := FileAccess.open("user://arm_src.json", FileAccess.WRITE)
+	j.store_string(JSON.stringify({"binds": binds, "rest": rest}))
+	j.close()
+	var mat := body_mesh.surface_get_material(0)
+	if mat is BaseMaterial3D and mat.albedo_texture:
+		var img: Image = mat.albedo_texture.get_image()
+		if img.is_compressed():
+			img.decompress()
+		img.save_png("user://arm_src.png")
+	print("dump-mesh: ", v.size(), " verts ", idx.size() / 3, " tris → ", ProjectSettings.globalize_path("user://arm_src.bin"))
+
+
+# tools/arm_mesh.py 가 만든 팔 든 메시(res://assets/arm_mesh.bin)를 읽는다. 없으면 null.
+# 형식: 점 수, 인덱스 수, 그 뒤로 위치·법선·UV·색(rgba)·뼈(int32×4)·가중치(×4)·인덱스가 통째로.
+func _load_arm_mesh() -> Mesh:
+	if not FileAccess.file_exists("res://assets/arm_mesh.bin"):
+		return null
+	var f := FileAccess.open("res://assets/arm_mesh.bin", FileAccess.READ)
+	var nv := f.get_32()
+	var ni := f.get_32()
+	var a := []
+	a.resize(Mesh.ARRAY_MAX)
+	a[Mesh.ARRAY_VERTEX] = f.get_buffer(nv * 12).to_vector3_array()
+	a[Mesh.ARRAY_NORMAL] = f.get_buffer(nv * 12).to_vector3_array()
+	a[Mesh.ARRAY_TEX_UV] = f.get_buffer(nv * 8).to_vector2_array()
+	a[Mesh.ARRAY_COLOR] = f.get_buffer(nv * 16).to_color_array()
+	a[Mesh.ARRAY_BONES] = f.get_buffer(nv * 16).to_int32_array()
+	a[Mesh.ARRAY_WEIGHTS] = f.get_buffer(nv * 16).to_float32_array()
+	a[Mesh.ARRAY_INDEX] = f.get_buffer(ni * 4).to_int32_array()
+	f.close()
+	var out := ArrayMesh.new()
+	out.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, a)
+	out.surface_set_material(0, body_mesh.surface_get_material(0))
+	return out

@@ -34,7 +34,20 @@ import IOKit.ps
 import AVFoundation
 
 let textMaxW: CGFloat = 320    // 글 최대 폭(상자 안쪽)
-let fontSize: CGFloat = 14     // 입력칸과 같은 크기·글꼴, 굵기만 조금 더
+let fontSize: CGFloat = 14     // 말과 입력칸 같은 크기·글꼴
+
+// 글꼴: 카카오 빅 산스 레귤러. 빌드가 ~/Library/Fonts 의 파일을 앱 Resources/fonts 에 넣고(저장소에는 안 넣음),
+// 여기서 이 프로세스에만 등록한다. 없으면(개발 실행에 파일이 없는 등) 시스템 글꼴.
+let uiFont: NSFont = {
+    var urls: [URL] = []
+    if let p = Bundle.main.path(forResource: "KakaoBigSans-Regular", ofType: "ttf", inDirectory: "fonts") { urls.append(URL(fileURLWithPath: p)) }
+    urls.append(URL(fileURLWithPath: NSHomeDirectory() + "/Library/Fonts/KakaoBigSans-Regular.ttf"))
+    for u in urls where FileManager.default.fileExists(atPath: u.path) {
+        CTFontManagerRegisterFontsForURL(u as CFURL, .process, nil)
+        break
+    }
+    return NSFont(name: "KakaoBigSans-Regular", size: fontSize) ?? .systemFont(ofSize: fontSize)
+}()
 let textPad = NSSize(width: 14, height: 9)   // 상자 안 여백
 let inputW: CGFloat = 240
 let inputIdle: TimeInterval = 5.0   // 입력이 이만큼 없으면 입력칸을 닫는다(답장일 때만)
@@ -203,7 +216,7 @@ final class CandyBox: NSView {
 
 final class TextView: NSView {
     var text = ""
-    let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+    let font = uiFont
 
     func attrs() -> [NSAttributedString.Key: Any] {
         let p = NSMutableParagraphStyle()
@@ -528,14 +541,14 @@ final class Talk: NSObject, NSTextFieldDelegate {
     func input(mode: String) {
         field.removeFromSuperview()
         field = mode == "key" ? NSSecureTextField() : NSTextField()
-        field.font = .systemFont(ofSize: 14)
+        field.font = uiFont
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
         field.textColor = Candy.beige.text
         field.placeholderAttributedString = NSAttributedString(
             string: mode == "key" ? "키를 붙여 넣고 Enter" : "답장 쓰고 Enter",
-            attributes: [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: Candy.beige.hint])
+            attributes: [.font: uiFont, .foregroundColor: Candy.beige.hint])
         field.delegate = self
         field.target = self
         field.action = #selector(submit)

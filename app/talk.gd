@@ -103,6 +103,16 @@ var last_err := ""             # 방금 실패의 까닭: credit(크레딧 바�
 var last_tools: Array = []     # 방금 받은 응답의 tool_use 들
 var acts := {}                 # 도우미에 보낸 동작 id → {"say": Claude 가 쓴 한마디}
 var act_id := 0
+# 업데이트: 처음엔 10초 뒤, 그 뒤 6시간마다 도우미가 GitHub 릴리스를 확인한다. 새 버전이 있으면 캐릭터가
+# 말풍선으로 묻고(입력칸), 사용자가 "응"이라고 하면 받아서 앱을 끝낸다 → 셸이 번들을 바꾸고 다시 띄운다.
+# 다시 뜬 앱은 state.updated_to 를 보고 "업데이트 끝" 이라고 말한다. 거절하거나 지나치면 3시간 뒤에 다시 묻는다.
+const UPDATE_FIRST := 10.0
+const UPDATE_EVERY := 6.0 * 3600.0
+const UPDATE_REASK := 3.0 * 3600.0
+var up_left := UPDATE_FIRST
+var new_version := {}          # {"v": "0.1.1", "url": zip}
+var up_asked_at := -1e9
+var installing := false
 var confirm := {}              # 넣을까? 하고 물어 둔 할 일·일정(tool_use)
 
 
@@ -229,6 +239,25 @@ func _events() -> void:
 		elif e.begins_with("menu "):
 			menu_open = false
 			menu_pick.emit(e.substr(5))
+		elif e.begins_with("update "):
+			var f := e.split(" ")
+			if f.size() == 3:
+				new_version = {"v": f[1], "url": f[2]}
+		elif e.begins_with("noupdate "):
+			var cur := e.substr(9)
+			new_version = {}
+			if String(state.get("updated_to", "")) == cur:
+				state.erase("updated_to")
+				_save()
+				say("업데이트 끝! 이제 v%s야." % cur, NUDGE_SHOW)
+		elif e == "upready":
+			# 말이 잠깐 보이게 두었다가 끝낸다. 끝나면 셸이 새 번들로 바꿔 다시 띄운다.
+			get_tree().create_timer(1.5).timeout.connect(func(): get_tree().quit())
+		elif e == "upfail":
+			installing = false
+			state.erase("updated_to")
+			_save()
+			say("업데이트를 받다가 실패했어. 나중에 다시 해 볼게.")
 		elif e == "voicedone":
 			if voicing > 0.0:
 				voicing = 0.0
@@ -279,9 +308,12 @@ func _on_submit(text: String) -> void:
 		var c := confirm
 		confirm = {}
 		var yes := false
-		for w in ["응", "어", "네", "예", "그래", "좋아", "ㅇ", "넣어", "콜", "yes", "ok", "ㄱ"]:
+		for w in ["응", "어", "네", "예", "그래", "좋아", "ㅇ", "넣어", "콜", "yes", "ok", "ㄱ", "해", "업데이트"]:
 			if text.to_lower().begins_with(w):
 				yes = true
+		if c.get("kind", "") == "update":
+			_update_answer(c, yes)
+			return
 		_push("u", text)
 		if yes:
 			_run(c, "")
@@ -432,6 +464,7 @@ func step(dt: float) -> void:
 			if show_left <= 0.0:
 				_close()
 	_timer_step()
+	_update_step(dt)
 	ctx_left -= dt
 	if ctx_left <= 0.0:
 		ctx_left = CTX_EVERY
@@ -749,3 +782,34 @@ func _self_info() -> String:
 	_today()
 	return ("너의 말 모델: %s\n오늘 Claude 호출: %d번 씀, 하루 상한 %d번(먼저 말 걸기·대답·기억 정리·말 줄이기 모두 한 번씩). 먼저 말 걸기는 오늘 %d/%d번.\n" % [
 		"Sonnet" if sonnet() else "Haiku", int(state.calls) + 1, DAY_CALLS, int(state.nudges), DAY_NUDGES])
+
+
+# ---------------------------------------------------------------- 업데이트
+
+func _update_step(dt: float) -> void:
+	up_left -= dt
+	if up_left <= 0.0:
+		up_left = UPDATE_EVERY
+		_send({"op": "upcheck"})
+	if new_version.is_empty() or installing or mode != HIDDEN or busy or menu_open:
+		return
+	var now := Time.get_unix_time_from_system()
+	if now - up_asked_at < UPDATE_REASK:
+		return
+	up_asked_at = now
+	confirm = {"kind": "update", "v": new_version.v, "url": new_version.url}
+	var line := "새 버전 v%s이 나왔어! 지금 업데이트할까?" % new_version.v
+	spoke.emit()
+	_open(line, REPLY)
+	speak(line)
+
+
+func _update_answer(c: Dictionary, yes: bool) -> void:
+	if not yes:
+		say("알겠어, 나중에 다시 물어볼게.")
+		return
+	installing = true
+	state.updated_to = c.v
+	_save()
+	say("좋아, 업데이트하고 금방 돌아올게!", 30.0)
+	_send({"op": "upinstall", "url": c.url, "pid": OS.get_process_id()})

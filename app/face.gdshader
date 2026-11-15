@@ -35,10 +35,17 @@ uniform bool debug = false;
 
 // 머리카락·리본 색 바꾸기(말 모델이 Sonnet 일 때 파랑). 0 = 원래 빨강, 1 = tint_to.
 // 색상(hue)을 돌리는 방식이라 음영은 그대로 남고, 중간값은 보라를 거쳐 간다.
+#define BLOOM_HUE 0.14
+#define BLOOM_MIN_Y -10.0      // 머리 뼈 기준 cm. 가방 고리·신발의 노란 점은 빼려고 머리 높이만
 uniform float tint = 0.0;
 uniform vec3 tint_from = vec3(0.91, 0.39, 0.39);     // 원래 머리 빨강(텍스처에서 잰 값)
 uniform vec3 tint_to = vec3(0.25, 0.52, 0.95);       // 밝은 cerulean blue(원래 빨강과 밝기가 비슷하게)
 uniform bool tint_debug = false;                     // 바뀌는 곳을 초록으로
+
+// 머리 꽃핀 가운데 노란 부분 색 바꾸기(목소리를 켜면 핫핑크). 0 = 원래 노랑, 1 = bloom_to.
+uniform float bloom = 0.0;
+uniform vec3 bloom_to = vec3(1.0, 0.24, 0.66);        // 밝은 핫핑크
+uniform bool bloom_debug = false;                    // 바뀌는 곳을 초록으로
 
 varying vec3 hp;
 varying vec3 hn;
@@ -190,6 +197,19 @@ void fragment() {
 				oc = mix(vec3(want), oc, (1.0 - want) / max(top - want, 1e-4));
 			}
 			c = mix(c, oc, w);
+		}
+	}
+	// 꽃 가운데 노랑: 색상·채도·명도로 고른다(원래 텍스처 색 기준).
+	if (bloom > 0.001 || bloom_debug) {
+		vec3 h0 = rgb2hsv(t.rgb);
+		float wb = (1.0 - smoothstep(0.05, 0.08, abs(hue_diff(h0.x, BLOOM_HUE))))
+			* smoothstep(0.25, 0.40, h0.y) * smoothstep(0.40, 0.55, h0.z) * step(BLOOM_MIN_Y, hp.y);
+		if (bloom_debug) {
+			c = mix(c, vec3(0.0, 1.0, 0.0), wb * 0.85);
+		} else {
+			// 음영은 원래 명도 비율로 남기고 밝게(핫핑크가 칙칙해지지 않게 최대 1.15배).
+			vec3 oc = bloom_to * clamp(h0.z / 0.92, 0.55, 1.15);
+			c = mix(c, min(oc, vec3(1.0)), wb * bloom);
 		}
 	}
 	if (debug && front && hair) {

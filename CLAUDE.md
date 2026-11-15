@@ -86,7 +86,16 @@
 - 엔진은 Supertonic 3(로컬 ONNX), 목소리 F1, steps 8, speed 1.05. `app/helper/tts_daemon.py`(빌드가 Resources 로 복사)를 22SUTO 의 파이썬 환경(`~/Library/Application Support/22SUTO/venv/bin/python -I`)으로 띄워 모델(`~/.cache/supertonic3`, 385MB)을 빌려 쓴다. 22SUTO 가 없는 맥(회사 맥 등)에서는 조용히 안 읽는다.
 - 도우미의 `Voice`가 wav 를 받아 AVAudioEngine 으로 재생하면서 음만 +450 cent(`voicePitch`, 반음 4.5개. 2026-11-15 F5+300 → F1+450) 올려 여자아이처럼(빠르기는 그대로). 한 줄 만드는 데 0.7~0.95초(이 맥 실측), 모델 올리기 0.5초. Mute 를 누르면 엔진 프로세스를 내려 메모리(~400MB)를 비운다.
 - 읽는 동안(만드는 1초 포함)은 말풍선이 사라지지 않는다(`talk.voicing`). 도우미가 스피커로 다 내보낸 뒤(`.dataPlayedBack`) 또는 못 읽을 때 "voicedone" 을 주면 풀리고, 표시 시간이 이미 지났으면 1초 뒤 닫힌다. 30초 넘게 소식이 없으면 그냥 푼다(`SPEAK_MAX`).
+- 목소리를 켜면 머리 꽃핀 가운데(노랑)가 밝은 핫핑크(1.0, 0.24, 0.66)로 바뀐다(Haiku·Sonnet 공통, `face.gdshader`의 `bloom`, `main.gd`의 `_bloom_step`이 `TINT_TIME`에 걸쳐). 노랑을 색상(0.14)·채도·명도로 고르고 머리 높이(`BLOOM_MIN_Y` 머리 뼈 −10cm 위)만 바꾼다(가방 고리·신발에도 노란 점이 있어서). 확인: `--snapshot`의 `bloom_body_mask`(초록), `bloom_body`·`_side`·`_back`.
 - 2026-11-14 처음엔 맥 기본 음성(AVSpeechSynthesizer 유나, 프리미엄 포함)을 음 높여 썼는데 어색해서 뺐다.
+
+### 업데이트·릴리스 (2026-11-15)
+
+- 저장소는 2026-11-15 공개로 바꿨다(앱이 GitHub 릴리스를 키 없이 확인해야 해서. 02rapi·36NOCH 와 같은 방식).
+- 앱 안 업데이트: 켜고 10초 뒤, 그 뒤 6시간마다 도우미(`Updater`)가 `releases/latest` 태그를 이 앱 버전(Info.plist 의 CFBundleShortVersionString = `export_presets.cfg`의 `short_version`)과 비교한다. 새 버전이면 캐릭터가 "새 버전 vX이 나왔어! 지금 업데이트할까?"라고 묻고 입력칸이 뜬다(말풍선이 없고 대답 대기·메뉴가 아닐 때). "응/네/그래/좋아/해/업데이트…"로 시작하면 zip 을 받아 풀고(격리 표시 지움) 앱을 끝낸다 → 작은 셸이 Godot 가 끝나길 기다려 번들을 바꾸고 다시 띄운다. 다시 뜬 앱은 `state.updated_to`를 보고 "업데이트 끝! 이제 vX야."라고 말한다. 거절하거나 입력칸이 그냥 닫히면 3시간 뒤 다시 묻는다. 내보낸 .app 안에서만 동작.
+- 시험: 앱 사본의 도우미를 `RHHG_UPDATE_CURRENT_VERSION=0.0.1`로 띄워 `upcheck`·`upinstall`(pid 는 아무 sleep 프로세스)을 보내면 사본이 최신 릴리스로 바뀌고 다시 뜬다(2026-11-15 확인).
+- 릴리스 만들기: `export_presets.cfg`의 `short_version`을 올린 뒤(번호는 사용자에게 물을 것) `zsh packaging/make_dmg.sh` → `build/release/37RHHG-<버전>.dmg`(배경 그림 `packaging/dmg_background.png`, 창 640×480, 앱 (190,242)·응용 프로그램 (450,242)) + `37RHHG-v<버전>.zip`(앱 안 업데이트가 받는 것). `gh release create v<버전> dmg zip --notes-file …`. zip 이 꼭 있어야 업데이트가 된다.
+- 앱 아이콘: `swift packaging/make_icon.swift 원본.png app/icon.png`(1024 캔버스 안 824 둥근 사각으로 자름).
 
 ### 프레임 (2026-11-14)
 

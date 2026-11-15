@@ -12,6 +12,8 @@
 //   {"op":"scan","px":..,"py":..,"cell":16}         그 점이 있는 화면을 찍어 칸마다 복잡도를 잰다(혼자 돌아다니기용)
 //   {"op":"step","px":..,"py":..,"m":[a,b,c,d]}     발자국 하나: 단위 원을 (a,b)·(c,d) 열로 옮긴 타원(pt, y 아래 +), 2초에 걸쳐 사라짐
 //   {"op":"speak","text":"…"} {"op":"voiceoff"}     캐릭터의 말을 Supertonic 3 로 읽기 / 끄기(엔진도 내린다)
+//   {"op":"upcheck"}                                GitHub 최신 릴리스와 이 앱 버전을 비교한다
+//   {"op":"upinstall","url":"zip 주소","pid":Godot pid}  받아서 풀고, Godot 가 끝나면 번들을 바꿔 다시 띄운다
 //   {"op":"ctx"}                                    맥과 주변 정보(일정·할 일·날씨·지금 쓰는 앱·음악 등)를 모아 돌려준다
 //   {"op":"act","id":n,"name":"music|volume|open_app|open_url|add_reminder|add_event","input":{…}}  다른 앱 움직이기
 // 표준 출력(한 줄씩): "over"/"out"(마우스가 글씨 위에 들어옴/나감) | "click"(글씨를 누름) | "typing"(입력칸에 처음 글을 침)
@@ -19,6 +21,8 @@
 //                   | "menu <버튼 이름>"(메뉴 버튼을 누름) | "menuclose"(바깥을 눌렀거나 한동안 안 써서 닫힘)
 //                   | "ctx <base64 글>"(맥과 주변 정보, 한 줄에 하나씩, 한국어)
 //                   | "voicedone"(읽던 말을 다 읽음, 또는 못 읽음)
+//                   | "update <새 버전> <zip 주소>" | "noupdate <지금 버전>" | "upready"(설치 준비 끝, 앱을 끝내면 바뀜)
+//                   | "upfail"(받기·풀기 실패)
 //                   | "acted <id> ok|fail <base64 한마디>"(act 결과)
 //                   | "grid <열> <행> <화면 x> <화면 y> <칸 pt> <base64 busy> <base64 edge>" | "noscan"(권한 없음·실패)
 // 표준 입력이 닫히면(앱이 끝나면) 같이 끝난다.
@@ -612,6 +616,8 @@ final class Talk: NSObject, NSTextFieldDelegate {
         case "menu": showMenu(dir: j["dir"] as? String ?? "", items: j["items"] as? [String] ?? [])
         case "hidemenu": hideMenu()
         case "ctx": macContext.gather()
+        case "upcheck": updater.check()
+        case "upinstall": updater.install(j["url"] as? String ?? "", pid: j["pid"] as? Int ?? 0)
         case "speak": voice.speak(j["text"] as? String ?? "")
         case "voiceoff": voice.off()
         case "step":
@@ -622,6 +628,86 @@ final class Talk: NSObject, NSTextFieldDelegate {
         case "scan": scan(at: CGPoint(x: j["px"] as? Double ?? 0, y: j["py"] as? Double ?? 0), cell: CGFloat(j["cell"] as? Double ?? 16))
         default: break
         }
+    }
+}
+
+// ---------------------------------------------------------------- 업데이트
+// 02rapi·36NOCH 방식: GitHub 공개 저장소의 releases/latest 태그를 이 앱 버전(CFBundleShortVersionString)과
+// 비교하고, 첨부된 zip 을 받아 풀어 둔다. 실제 교체는 Godot 가 끝난 뒤 작은 셸이 한다(실행 중인 번들은 못 바꿔서).
+// 내보낸 .app 안에서만 동작한다(개발 실행은 Bundle.main 이 앱이 아님).
+let releaseAPI = URL(string: "https://api.github.com/repos/marzipan2025/37RHHG/releases/latest")!
+
+final class Updater {
+    var bundle: URL { Bundle.main.bundleURL }
+    var current: String {
+        ProcessInfo.processInfo.environment["RHHG_UPDATE_CURRENT_VERSION"]   // 시험용
+            ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+    }
+
+    static func newer(_ a: String, than b: String) -> Bool {
+        let x = a.split(separator: ".").map { Int($0) ?? 0 }, y = b.split(separator: ".").map { Int($0) ?? 0 }
+        for i in 0..<max(x.count, y.count) {
+            let p = i < x.count ? x[i] : 0, q = i < y.count ? y[i] : 0
+            if p != q { return p > q }
+        }
+        return false
+    }
+
+    func check() {
+        guard bundle.pathExtension == "app" else { return }
+        var r = URLRequest(url: releaseAPI, timeoutInterval: 15)
+        r.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        URLSession.shared.dataTask(with: r) { d, resp, _ in
+            guard (resp as? HTTPURLResponse)?.statusCode == 200,
+                  let j = d.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }),
+                  let tag = j["tag_name"] as? String, let assets = j["assets"] as? [[String: Any]] else { return }
+            let v = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            let zip = assets.first { ($0["name"] as? String)?.hasSuffix(".zip") == true }?["browser_download_url"] as? String
+            DispatchQueue.main.async {
+                if Updater.newer(v, than: self.current), let zip { emit("update \(v) \(zip)") }
+                else { emit("noupdate \(self.current)") }
+            }
+        }.resume()
+    }
+
+    func install(_ url: String, pid: Int) {
+        guard bundle.pathExtension == "app", let u = URL(string: url), pid > 0 else { emit("upfail"); return }
+        let work = FileManager.default.temporaryDirectory.appendingPathComponent("rhhg-update-\(UUID().uuidString)")
+        URLSession.shared.downloadTask(with: u) { file, resp, _ in
+            func fail() { DispatchQueue.main.async { emit("upfail") } }
+            guard let file, (resp as? HTTPURLResponse)?.statusCode == 200 else { return fail() }
+            let fm = FileManager.default
+            try? fm.createDirectory(at: work, withIntermediateDirectories: true)
+            let zip = work.appendingPathComponent("u.zip")
+            guard (try? fm.moveItem(at: file, to: zip)) != nil,
+                  Updater.run("/usr/bin/ditto", ["-x", "-k", zip.path, work.path]) else { return fail() }
+            guard let app = (try? fm.contentsOfDirectory(atPath: work.path))?.first(where: { $0.hasSuffix(".app") })
+            else { return fail() }
+            let staged = work.appendingPathComponent(app)
+            _ = Updater.run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", staged.path])
+            // Godot 가 끝나기를 기다렸다가 옛 번들을 새것으로 바꾸고 다시 띄운다(이 도우미도 그때 같이 끝난다).
+            let target = self.bundle.path
+            let sh = "while /bin/kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; sleep 0.5; " +
+                "/bin/rm -rf \"$1\" && /bin/mv \"$0\" \"$1\" && /bin/rm -rf \"$2\"; /usr/bin/open \"$1\""
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/sh")
+            p.arguments = ["-c", sh, staged.path, target, work.path]
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            do { try p.run() } catch { return fail() }
+            DispatchQueue.main.async { emit("upready") }
+        }.resume()
+    }
+
+    static func run(_ path: String, _ args: [String]) -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return false }
+        p.waitUntilExit()
+        return p.terminationStatus == 0
     }
 }
 
@@ -1424,6 +1510,7 @@ app.setActivationPolicy(.accessory)
 let talk = Talk()
 let macContext = MacContext()
 let prints = Prints()
+let updater = Updater()
 let voice = Voice()
 Thread.detachNewThread {
     while let line = readLine() {

@@ -826,6 +826,18 @@ func _setup_menu() -> void:
 	print("status indicator ", ind, " feature ", DisplayServer.has_feature(DisplayServer.FEATURE_STATUS_INDICATOR))
 
 
+# 목소리를 켜면 머리 꽃핀 가운데가 노랑 → 핫핑크(Haiku·Sonnet 공통). 머리 색처럼 TINT_TIME 에 걸쳐 바뀐다.
+var bloom_now := -1.0
+
+
+func _bloom_step(dt: float) -> void:
+	var want := 1.0 if talk.voice() else 0.0
+	if bloom_now == want or face_mat == null:
+		return
+	bloom_now = want if bloom_now < 0.0 else move_toward(bloom_now, want, dt / TINT_TIME)
+	face_mat.set_shader_parameter("bloom", smoothstep(0.0, 1.0, bloom_now))
+
+
 func _tint_step(dt: float) -> void:
 	var want := 1.0 if talk.sonnet() else 0.0
 	if tint_now == want or face_mat == null:
@@ -1413,6 +1425,7 @@ func _process(dt: float) -> void:
 	_hover_step()
 	_click_step(dt)
 	_tint_step(dt)
+	_bloom_step(dt)
 	talk.step(dt)
 	_face_step(dt, 2 if jump_u >= 0.0 else (1 if run > 0.5 else 0), w < 0.15)
 	_pose(w, run, phase, clock, j, leap)
@@ -1734,6 +1747,18 @@ func _take_snapshots() -> void:
 		get_viewport().get_texture().get_image().save_png("res://snap/%s.png" % tb[0])
 	face_mat.set_shader_parameter("tint", 0.0)
 	face_mat.set_shader_parameter("tint_debug", false)
+	# 꽃 가운데(목소리 켜면 핫핑크): 바뀌는 곳(초록)과 바뀐 모습, 앞·옆·뒤
+	for bb in [["bloom_body_mask", 0.0, true, 0.0], ["bloom_body", 1.0, false, 0.0], ["bloom_body_side", 1.0, false, PI * 0.4],
+			["bloom_body_side_mask", 0.0, true, PI * 0.4], ["bloom_body_back", 1.0, false, PI]]:
+		face_mat.set_shader_parameter("bloom", bb[1])
+		face_mat.set_shader_parameter("bloom_debug", bb[2])
+		model.rotation.y = bb[3]
+		_pose(0.0, 0.0, 0.0, 0.0, 0.0)
+		await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png("res://snap/%s.png" % bb[0])
+	face_mat.set_shader_parameter("bloom", 0.0)
+	face_mat.set_shader_parameter("bloom_debug", false)
 	model.rotation.y = 0.0
 	_pose(0.0, 0.0, 0.0, 0.0, 0.0)
 	cam.size = 46.0 * k

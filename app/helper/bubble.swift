@@ -21,7 +21,7 @@
 //                   | "menu <버튼 이름>"(메뉴 버튼을 누름) | "menuclose"(바깥을 눌렀거나 한동안 안 써서 닫힘)
 //                   | "ctx <base64 글>"(맥과 주변 정보, 한 줄에 하나씩, 한국어)
 //                   | "voicedone"(읽던 말을 다 읽음, 또는 못 읽음)
-//                   | "update <새 버전> <zip 주소>" | "noupdate <지금 버전>" | "upready"(설치 준비 끝, 앱을 끝내면 바뀜)
+//                   | "update <새 버전> <zip 주소> <지금 버전>" | "noupdate <지금 버전>" | "upcheckfail" | "upready"(설치 준비 끝, 앱을 끝내면 바뀜)
 //                   | "upfail"(받기·풀기 실패)
 //                   | "acted <id> ok|fail <base64 한마디>"(act 결과)
 //                   | "grid <열> <행> <화면 x> <화면 y> <칸 pt> <base64 busy> <base64 edge>" | "noscan"(권한 없음·실패)
@@ -270,20 +270,28 @@ final class TextView: NSView {
 final class InputPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
-    // 메뉴가 없는 도우미라 ⌘V 등이 저절로 되지 않는다. 직접 넘겨 준다.
-    override func performKeyEquivalent(with e: NSEvent) -> Bool {
-        if e.type == .keyDown, e.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-           let ch = e.charactersIgnoringModifiers {
-            let sel: Selector? = ["v": #selector(NSText.paste(_:)), "c": #selector(NSText.copy(_:)),
-                                  "x": #selector(NSText.cut(_:)), "a": #selector(NSText.selectAll(_:))][ch]
-            if let sel, NSApp.sendAction(sel, to: nil, from: self) { return true }
-        }
-        return super.performKeyEquivalent(with: e)
-    }
     override func cancelOperation(_ sender: Any?) { emit("esc") }
     // 한글 조합 중에는 글이 바뀐 알림이 늦을 수 있어서, 키를 누르는 것 자체도 입력 시작으로 본다.
     var onKey: (() -> Void)?
+    // 메뉴가 없는 도우미라 ⌘V·⌘C·⌘X·⌘A·⌘Z 가 저절로 되지 않는다(예전의 performKeyEquivalent 로 넘기기는
+    // 앱이 활성화되지 않은 패널이라 닿지 않았다). 키가 들어오는 길목에서 입력칸 편집기에 직접 시킨다.
+    // ⌘V 는 그림이 있으면 그림을 먼저 받는다(onPasteImage 가 true 를 돌려주면 끝).
+    var onPasteImage: (() -> Bool)?
     override func sendEvent(_ e: NSEvent) {
+        if e.type == .keyDown, e.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
+           let ch = e.charactersIgnoringModifiers?.lowercased(), let ed = firstResponder as? NSTextView {
+            switch ch {
+            case "v":
+                onKey?()
+                if onPasteImage?() != true { ed.paste(nil) }
+                return
+            case "c": ed.copy(nil); return
+            case "x": onKey?(); ed.cut(nil); return
+            case "a": ed.selectAll(nil); return
+            case "z": ed.undoManager?.undo(); return
+            default: break
+            }
+        }
         if e.type == .keyDown, e.keyCode != 53 { onKey?() }
         super.sendEvent(e)
     }
@@ -396,6 +404,10 @@ final class Talk: NSObject, NSTextFieldDelegate {
     var idle: Timer?
     var idleOn = false
     var typed = false
+    // 붙여 넣은 그림(긴 변 1024px JPEG). 입력칸 왼쪽에 작은 그림으로 보여 주고 보낼 때 같이 넘긴다.
+    var image: Data?
+    let thumb = NSImageView()
+    var allowImage = false
     var prevApp: NSRunningApplication?
     let menuPanel = makePanel(NSPanel.self, shadow: false)
     lazy var textBox = CandyBox(.pink, content: textView)
@@ -420,6 +432,13 @@ final class Talk: NSObject, NSTextFieldDelegate {
         textPanel.contentView = textBox
         inputPanel.contentView = inputCandy
         inputPanel.onKey = { [weak self] in self?.startTyping() }
+        inputPanel.onPasteImage = { [weak self] in self?.pasteImage() ?? false }
+        thumb.imageScaling = .scaleProportionallyUpOrDown
+        thumb.wantsLayer = true
+        thumb.layer?.cornerRadius = 5
+        thumb.layer?.masksToBounds = true
+        thumb.layer?.borderWidth = 1
+        thumb.layer?.borderColor = Candy.beige.hint.withAlphaComponent(0.6).cgColor
     }
 
     // 왼쪽 위 원점 → Cocoa 좌표(아래가 원점)
@@ -552,9 +571,10 @@ final class Talk: NSObject, NSTextFieldDelegate {
         field.delegate = self
         field.target = self
         field.action = #selector(submit)
-        let size = NSSize(width: inputW, height: 36)
-        inputPanel.setContentSize(inputCandy.fit(size))
-        field.frame = NSRect(x: 12, y: 8, width: size.width - 24, height: 20)
+        image = nil
+        thumb.removeFromSuperview()
+        allowImage = mode != "key"
+        layoutInput()
         inputBox.addSubview(field)
         // 입력칸은 키보드를 가져간다. 닫을 때 원래 쓰던 앱에 돌려주려고 기억해 둔다.
         if !inputPanel.isVisible {
@@ -567,6 +587,23 @@ final class Talk: NSObject, NSTextFieldDelegate {
         idleOn = mode != "key"
         typed = false
         touch()
+        // 확인용: BUBBLE_TEST_PASTE=1 이면 입력칸을 연 뒤 ⌘V 와 Enter 키 이벤트를 패널에 직접 넣어 본다.
+        if ProcessInfo.processInfo.environment["BUBBLE_TEST_PASTE"] != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self else { return }
+                func key(_ ch: String, _ code: UInt16, _ mods: NSEvent.ModifierFlags) {
+                    if let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: mods, timestamp: 0,
+                                                windowNumber: self.inputPanel.windowNumber, context: nil, characters: ch,
+                                                charactersIgnoringModifiers: ch, isARepeat: false, keyCode: code) {
+                        self.inputPanel.sendEvent(e)
+                    }
+                }
+                key("v", 9, .command)
+                if ProcessInfo.processInfo.environment["BUBBLE_TEST_PASTE"] != "hold" {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { key("\r", 36, []) }
+                }
+            }
+        }
     }
 
     // 글을 치기 시작하면 Esc 나 Enter 전까지 입력칸을 닫지 않는다.
@@ -603,7 +640,62 @@ final class Talk: NSObject, NSTextFieldDelegate {
 
     @objc func submit() {
         let d = field.stringValue.data(using: .utf8) ?? Data()
-        emit("submit " + d.base64EncodedString())
+        // 그림이 있으면 세 번째 칸에 JPEG(base64). 글 없이 그림만 보내도 된다.
+        emit("submit " + d.base64EncodedString() + (image.map { " " + $0.base64EncodedString() } ?? ""))
+        image = nil
+        thumb.removeFromSuperview()
+    }
+
+    // 입력칸 크기: 그림이 있으면 왼쪽에 28pt 정사각 그림 자리를 두고 글칸을 그만큼 민다.
+    func layoutInput() {
+        let size = NSSize(width: inputW, height: 36)
+        inputPanel.setContentSize(inputCandy.fit(size))
+        let pad: CGFloat = image == nil ? 0 : 32
+        thumb.frame = NSRect(x: 8, y: 4, width: 28, height: 28)
+        field.frame = NSRect(x: 12 + pad, y: 8, width: size.width - 24 - pad, height: 20)
+        place()
+    }
+
+    // ⌘V: 클립보드에 그림(또는 그림 파일)이 있으면 받아서 작은 그림으로 보여 준다. 받았으면 true.
+    func pasteImage() -> Bool {
+        guard allowImage else { return false }
+        let pb = NSPasteboard.general
+        var img: NSImage?
+        let exts = ["png", "jpg", "jpeg", "gif", "heic", "webp", "tiff", "bmp"]
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
+           let u = urls.first(where: { exts.contains($0.pathExtension.lowercased()) }) {
+            img = NSImage(contentsOf: u)
+        }
+        if img == nil {
+            // 글만 있는 클립보드는 그림으로 읽지 않는다(서식 있는 글이 그림으로 바뀌는 것 방지).
+            let types = pb.types ?? []
+            if types.contains(.png) || types.contains(.tiff) || types.contains(NSPasteboard.PasteboardType("public.jpeg")) {
+                img = NSImage(pasteboard: pb)
+            }
+        }
+        guard let img, let jpeg = Talk.jpeg(img, maxSide: 1024) else { return false }
+        image = jpeg
+        thumb.image = img
+        inputBox.addSubview(thumb)
+        layoutInput()
+        return true
+    }
+
+    // 긴 변이 maxSide 를 넘지 않게 줄여 JPEG 로(토큰과 전송량을 줄인다).
+    static func jpeg(_ img: NSImage, maxSide: CGFloat) -> Data? {
+        guard let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let w = CGFloat(cg.width), h = CGFloat(cg.height)
+        let k = min(1, maxSide / max(w, h))
+        let nw = max(1, Int(w * k)), nh = max(1, Int(h * k))
+        guard let ctx = CGContext(data: nil, width: nw, height: nh, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        ctx.setFillColor(NSColor.white.cgColor)
+        ctx.fill(CGRect(x: 0, y: 0, width: nw, height: nh))     // 투명한 곳은 흰 바탕으로
+        ctx.interpolationQuality = .high
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: nw, height: nh))
+        guard let out = ctx.makeImage() else { return nil }
+        return NSBitmapImageRep(cgImage: out).representation(using: .jpeg, properties: [.compressionFactor: 0.82])
     }
 
     func controlTextDidChange(_ obj: Notification) { startTyping() }
@@ -611,6 +703,13 @@ final class Talk: NSObject, NSTextFieldDelegate {
     func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
         if sel == #selector(NSResponder.cancelOperation(_:)) {
             emit("esc")
+            return true
+        }
+        // 글이 비어 있을 때 지우기를 누르면 붙여 넣은 그림을 뺀다.
+        if sel == #selector(NSResponder.deleteBackward(_:)), field.stringValue.isEmpty, image != nil {
+            image = nil
+            thumb.removeFromSuperview()
+            layoutInput()
             return true
         }
         return false
@@ -673,11 +772,14 @@ final class Updater {
         URLSession.shared.dataTask(with: r) { d, resp, _ in
             guard (resp as? HTTPURLResponse)?.statusCode == 200,
                   let j = d.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }),
-                  let tag = j["tag_name"] as? String, let assets = j["assets"] as? [[String: Any]] else { return }
+                  let tag = j["tag_name"] as? String, let assets = j["assets"] as? [[String: Any]] else {
+                DispatchQueue.main.async { emit("upcheckfail") }
+                return
+            }
             let v = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
             let zip = assets.first { ($0["name"] as? String)?.hasSuffix(".zip") == true }?["browser_download_url"] as? String
             DispatchQueue.main.async {
-                if Updater.newer(v, than: self.current), let zip { emit("update \(v) \(zip)") }
+                if Updater.newer(v, than: self.current), let zip { emit("update \(v) \(zip) \(self.current)") }
                 else { emit("noupdate \(self.current)") }
             }
         }.resume()

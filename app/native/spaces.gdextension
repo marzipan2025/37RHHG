@@ -1,0 +1,6 @@
+[configuration]
+entry_symbol = "rhhg_spaces_init"
+compatibility_minimum = "4.1"
+
+[libraries]
+macos = "res://native/libspaces.dylib"

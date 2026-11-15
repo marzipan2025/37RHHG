@@ -91,6 +91,8 @@ const TOOLS := [
 			"start": {"type": "string", "description": "시작(로컬 시각) YYYY-MM-DDTHH:MM"},
 			"minutes": {"type": "integer", "description": "길이(분). 모르면 60"}},
 			"required": ["title", "start"]}},
+	{"name": "update_app", "description": "이 앱(캐릭터)을 새 버전으로 업데이트한다. 사용자가 업데이트하자고 하면 부른다. 새 버전이 없으면 앱이 그렇다고 알려 준다.",
+		"input_schema": {"type": "object", "properties": {}}},
 	{"name": "timer", "description": "몇 분 뒤에 캐릭터가 사용자에게 말로 알려 준다.",
 		"input_schema": {"type": "object", "properties": {
 			"minutes": {"type": "number"},
@@ -107,12 +109,17 @@ var act_id := 0
 # 말풍선으로 묻고(입력칸), 사용자가 "응"이라고 하면 받아서 앱을 끝낸다 → 셸이 번들을 바꾸고 다시 띄운다.
 # 다시 뜬 앱은 state.updated_to 를 보고 "업데이트 끝" 이라고 말한다. 거절하거나 지나치면 3시간 뒤에 다시 묻는다.
 const UPDATE_FIRST := 10.0
-const UPDATE_EVERY := 6.0 * 3600.0
+const UPDATE_EVERY := 3600.0           # 한 시간마다(GitHub 비인증 한도 시간당 60번이라 넉넉하다)
+const UPDATE_STALE := 600.0            # 말을 걸 때 마지막 확인이 이보다 오래면 다시 확인
 const UPDATE_REASK := 3.0 * 3600.0
 var up_left := UPDATE_FIRST
+var app_version := ""          # 이 앱 버전(도우미가 확인할 때 알려 준다)
+var up_checked_at := -1.0      # 마지막으로 확인한 때(유닉스 초), -1 이면 아직
+var up_failed := false         # 마지막 확인이 실패했다(인터넷 등)
 var new_version := {}          # {"v": "0.1.1", "url": zip}
 var up_asked_at := -1e9
 var installing := false
+var pending_image := ""        # 방금 보낸 말에 붙은 그림(JPEG base64). 대답 한 번에만 쓴다.
 var confirm := {}              # 넣을까? 하고 물어 둔 할 일·일정(tool_use)
 
 
@@ -226,6 +233,7 @@ func _events() -> void:
 		elif e == "click":
 			# 말풍선을 누르면 답장을 쓴다.
 			if mode == SHOW and not waiting:
+				_refresh_update()
 				_open(shown, REPLY)
 		elif e.begins_with("grid "):
 			var f := e.split(" ")
@@ -240,12 +248,23 @@ func _events() -> void:
 			menu_open = false
 			menu_pick.emit(e.substr(5))
 		elif e.begins_with("update "):
+			# "update <새 버전> <zip> <지금 버전>"
 			var f := e.split(" ")
-			if f.size() == 3:
+			if f.size() >= 3:
 				new_version = {"v": f[1], "url": f[2]}
+				if f.size() >= 4:
+					app_version = f[3]
+				up_checked_at = Time.get_unix_time_from_system()
+				up_failed = false
+		elif e == "upcheckfail":
+			up_checked_at = Time.get_unix_time_from_system()
+			up_failed = true
 		elif e.begins_with("noupdate "):
 			var cur := e.substr(9)
 			new_version = {}
+			app_version = cur
+			up_checked_at = Time.get_unix_time_from_system()
+			up_failed = false
 			if String(state.get("updated_to", "")) == cur:
 				state.erase("updated_to")
 				_save()
@@ -289,7 +308,10 @@ func _events() -> void:
 		elif e == "esc":
 			_close()
 		elif e.begins_with("submit "):
-			_on_submit(Marshalls.base64_to_utf8(e.substr(7)))
+			# "submit <글 base64> [<JPEG base64>]" — 입력칸에 그림을 붙여 넣었으면 세 번째 칸이 있다.
+			var f := e.split(" ")
+			pending_image = f[2] if f.size() > 2 else ""
+			_on_submit(Marshalls.base64_to_utf8(f[1]) if f.size() > 1 else "")
 
 
 func _on_submit(text: String) -> void:
@@ -312,7 +334,18 @@ func _on_submit(text: String) -> void:
 			if text.to_lower().begins_with(w):
 				yes = true
 		if c.get("kind", "") == "update":
-			_update_answer(c, yes)
+			var no := false
+			for w in ["아니", "아뇨", "싫", "나중", "안 해", "안해", "말고", "됐어", "ㄴ", "no"]:
+				if text.to_lower().begins_with(w):
+					no = true
+			if yes and not no:
+				_update_answer(c, true)
+			elif no:
+				_update_answer(c, false)
+			else:
+				# "몇 버전이야?", "뭐가 바뀌었어?" 같은 말은 거절이 아니라 대화다. Claude 가 업데이트 상태를 알고
+				# 대답하고, 사용자가 하겠다고 하면 update_app 도구로 설치한다.
+				_reply(text)
 			return
 		_push("u", text)
 		if yes:
@@ -322,7 +355,7 @@ func _on_submit(text: String) -> void:
 			_save()
 			say("알겠어, 안 넣을게.")
 		return
-	if text.is_empty():
+	if text.is_empty() and pending_image.is_empty():
 		_close()
 		return
 	_reply(text)
@@ -339,7 +372,14 @@ func ask_key() -> void:
 	_open("Claude API 키를 넣어 줘", KEY)
 
 
+# 마지막 확인이 오래됐으면 지금 다시 확인한다(사용자가 말을 걸 때, 대답에 최신 상태가 들어가게).
+func _refresh_update() -> void:
+	if up_checked_at < 0.0 or Time.get_unix_time_from_system() - up_checked_at > UPDATE_STALE:
+		_send({"op": "upcheck"})
+
+
 func talk_now() -> void:
+	_refresh_update()
 	if key.is_empty():
 		ask_key()
 	else:
@@ -542,7 +582,7 @@ func _push(r: String, t: String) -> void:
 		state.turns.pop_front()
 
 
-func _call(system: String, prompt: String, _max_tokens: int, done: Callable, tools: Array = []) -> bool:
+func _call(system: String, prompt: String, _max_tokens: int, done: Callable, tools: Array = [], image := "") -> bool:
 	_today()
 	if busy or key.is_empty() or int(state.calls) >= DAY_CALLS:
 		return false
@@ -550,7 +590,9 @@ func _call(system: String, prompt: String, _max_tokens: int, done: Callable, too
 		"model": SONNET if sonnet() else HAIKU,
 		"max_tokens": MAX_TOKENS,
 		"system": system,
-		"messages": [{"role": "user", "content": prompt}],
+		"messages": [{"role": "user", "content": prompt if image.is_empty() else [
+			{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image}},
+			{"type": "text", "text": prompt}]}],
 		"output_config": {"effort": EFFORT},
 	}
 	if not tools.is_empty():
@@ -655,7 +697,14 @@ func _fit(text: String, limit: int, done: Callable) -> void:
 
 
 func _reply(text: String) -> void:
+	# 그림을 붙여 보냈으면 이번 대답에만 같이 보낸다. 대화 기록에는 "[사진]"으로만 남긴다(그림은 저장하지 않음).
+	var image := pending_image
+	pending_image = ""
+	if not image.is_empty():
+		text = ("[사진] " + text).strip_edges()
 	var prompt := "최근 대화:\n%s사용자: %s\n(사용자의 말에 대답해라. 대화가 이어지도록, 어울리면 끝에 질문 하나를 붙여라. 한두 문장 %d자 이내.\n" % [_recent(), text, REPLY_MAX_CHARS]
+	if not image.is_empty():
+		prompt += "사용자가 사진 한 장을 같이 보냈다. 사진에 보이는 것을 구체적으로 짚어 반응해라.\n"
 	prompt += "사용자가 음악·소리 크기·앱 열기·웹페이지·할 일·일정·타이머를 부탁하면 도구를 써라. 도구를 쓸 때도 사용자에게 할 짧은 한마디(반말)를 텍스트로 같이 써라(예: '좋아, 틀어 줄게!'). 해 준다고 말만 하고 도구를 빼먹지 마라. 부탁하지 않은 일은 하지 마라. 도구는 한 번에 하나만.)"
 	_today()
 	if int(state.calls) >= DAY_CALLS:
@@ -683,7 +732,7 @@ func _reply(text: String) -> void:
 			say(a)
 			if int(state.since_memo) >= MEMO_EVERY:
 				_memo.call_deferred())
-	if not _call(_system(), prompt, 0, done, TOOLS):
+	if not _call(_system(), prompt, 0, done, TOOLS, image):
 		say("지금은 대답을 못 하겠어.")
 
 
@@ -728,6 +777,16 @@ func _run(tool: Dictionary, answer: String) -> void:
 		waiting = false
 		_open(what, REPLY)
 		speak(what)
+		return
+	if name == "update_app":
+		if new_version.is_empty():
+			var line := "지금은 새 버전이 없어. 이게 최신이야%s." % ((" (v%s)" % app_version) if not app_version.is_empty() else "")
+			_push("m", line)
+			_save()
+			say(line)
+		else:
+			_push("m", "v%s로 업데이트할게!" % new_version.v)
+			_update_answer({"v": new_version.v, "url": new_version.url}, true)
 		return
 	if name == "timer":
 		var mins := float(input.get("minutes", 0))
@@ -780,11 +839,32 @@ func _fail_line(code: int) -> String:
 # 이 앱이 직접 아는 자기 상태(하루 호출 횟수 등). 사용자가 물으면 답할 수 있게 맥 정보 앞에 붙인다.
 func _self_info() -> String:
 	_today()
-	return ("너의 말 모델: %s\n오늘 Claude 호출: %d번 씀, 하루 상한 %d번(먼저 말 걸기·대답·기억 정리·말 줄이기 모두 한 번씩). 먼저 말 걸기는 오늘 %d/%d번.\n" % [
+	return _update_info() + ("너의 말 모델: %s\n오늘 Claude 호출: %d번 씀, 하루 상한 %d번(먼저 말 걸기·대답·기억 정리·말 줄이기 모두 한 번씩). 먼저 말 걸기는 오늘 %d/%d번.\n" % [
 		"Sonnet" if sonnet() else "Haiku", int(state.calls) + 1, DAY_CALLS, int(state.nudges), DAY_NUDGES])
 
 
 # ---------------------------------------------------------------- 업데이트
+
+# 업데이트 상태를 말로(시스템 프롬프트에 붙는다). 이게 없으면 Claude 는 업데이트를 몰라서 지어낸다.
+func _update_info() -> String:
+	var ver := ("v" + app_version) if not app_version.is_empty() else "(모름)"
+	var when := "아직 확인 전"
+	if up_checked_at > 0.0:
+		var mins := int((Time.get_unix_time_from_system() - up_checked_at) / 60.0)
+		when = "방금 확인" if mins < 1 else "%d분 전 확인" % mins
+	var st := ""
+	if installing:
+		st = "지금 v%s로 업데이트하는 중" % new_version.get("v", "?")
+	elif not new_version.is_empty():
+		st = "새 버전 v%s 있음(아직 안 함). 사용자가 하자고 하면 update_app 도구를 불러라" % new_version.v
+	elif up_failed:
+		st = "확인 실패(인터넷 문제일 수 있음)"
+	elif up_checked_at > 0.0:
+		st = "새 버전 없음(최신)"
+	else:
+		st = "아직 모름"
+	return "이 앱 버전: %s. 업데이트: %s, %s.\n" % [ver, st, when]
+
 
 func _update_step(dt: float) -> void:
 	up_left -= dt
@@ -799,6 +879,8 @@ func _update_step(dt: float) -> void:
 	up_asked_at = now
 	confirm = {"kind": "update", "v": new_version.v, "url": new_version.url}
 	var line := "새 버전 v%s이 나왔어! 지금 업데이트할까?" % new_version.v
+	_push("m", line)       # 대화 기록에 남겨야 Claude 가 "방금 업데이트 물어봤지" 를 안다
+	_save()
 	spoke.emit()
 	_open(line, REPLY)
 	speak(line)
@@ -806,6 +888,8 @@ func _update_step(dt: float) -> void:
 
 func _update_answer(c: Dictionary, yes: bool) -> void:
 	if not yes:
+		_push("m", "알겠어, 나중에 다시 물어볼게.")
+		_save()
 		say("알겠어, 나중에 다시 물어볼게.")
 		return
 	installing = true

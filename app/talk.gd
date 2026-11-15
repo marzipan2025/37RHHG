@@ -256,6 +256,10 @@ func _events() -> void:
 					app_version = f[3]
 				up_checked_at = Time.get_unix_time_from_system()
 				up_failed = false
+		elif e.begins_with("upaccept "):
+			# 메뉴의 "업데이트 확인…" 대화상자에서 [업데이트]를 눌렀다.
+			if not new_version.is_empty() and not installing:
+				_update_answer({"v": new_version.v, "url": new_version.url}, true)
 		elif e == "upcheckfail":
 			up_checked_at = Time.get_unix_time_from_system()
 			up_failed = true
@@ -370,6 +374,11 @@ func scan(p: Vector2, cell: float) -> void:
 
 func ask_key() -> void:
 	_open("Claude API 키를 넣어 줘", KEY)
+
+
+# 메뉴바 "업데이트 확인…": 바로 확인하고 결과를 대화상자로 보여 준다.
+func check_update() -> void:
+	_send({"op": "upcheck", "manual": true})
 
 
 # 마지막 확인이 오래됐으면 지금 다시 확인한다(사용자가 말을 걸 때, 대답에 최신 상태가 들어가게).

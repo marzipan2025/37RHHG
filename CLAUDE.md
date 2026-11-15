@@ -24,7 +24,7 @@
   - 버튼 상태 표시는 모두 같다: 올리면 1.06배·밝게·그림자 짙게, 누르면 0.95배·어둡게·그림자 얕게. 뜰 때는 위에서부터 차례로 커지며 나타난다.
   - 닫힘: 버튼을 누름, 바깥을 누름(전역 마우스 감시. 캐릭터 위 클릭은 Godot가 처리), 캐릭터를 다시 클릭, 마우스가 메뉴 밖인 채 8초. 떠 있는 동안 캐릭터는 돌아다니지 않고 정면을 본다.
   - 확인: 실행 인자 `--menu`(1.5초 뒤 메뉴를 띄우고 머리끝 좌표를 로그로).
-- 메뉴바 아이콘 메뉴에는 "화면 아래 가운데로", "Claude 키 넣기…", "종료"만 있다. 메뉴바 아이콘이 가려지는 맥(노치·메뉴바 정리 앱)에서는 이 셋에 닿을 방법이 없으니 주의.
+- 메뉴바 아이콘 메뉴에는 "화면 아래 가운데로", "Claude 키 넣기…", "업데이트 확인…"(2026-11-15), "종료"만 있다. "업데이트 확인…"은 바로 확인해 결과를 macOS 대화상자로 보인다(도우미 `Updater.alert`: 새 버전이면 [업데이트]/[나중에], 아니면 [확인], 실패도 알림). [업데이트]를 누르면 `upaccept` → 평소 설치 흐름. 메뉴바 아이콘이 가려지는 맥(노치·메뉴바 정리 앱)에서는 이 셋에 닿을 방법이 없으니 주의.
 - 메뉴바 아이콘: `DisplayServer.create_status_indicator` + `NativeMenu`. 생성은 확인했지만(로그 `status indicator 0 feature true`) 이 회사 맥에서는 노치·메뉴바 정리 앱 때문에 눈으로 보이지 않았다. 자주 쓰는 기능은 캐릭터 클릭 메뉴에 있다.
 - 모든 데스크탑(Spaces)에 보이기(2026-11-15): Godot 는 창의 collectionBehavior 를 바꿀 수 없어서 작은 GDExtension(`app/native/spaces.m` → `libspaces.dylib`, `spaces.gdextension`)을 둔다. Godot API 는 안 쓰고 진입 함수에서 빈 초기화만 돌려준 뒤, 1초마다 이 앱 창들에 canJoinAllSpaces·stationary·fullScreenAuxiliary 를 붙인다. 내보내기가 dylib 를 `Contents/Frameworks`에 넣는다. 다시 만들기: `zsh app/native/build.sh`(universal). 확인: 임시 폴더의 `rhhg_spaces.txt`에 바꾼 창과 값(0x111)이 남는다. 말풍선 패널은 원래부터 모든 데스크탑에 보였다.
 - Dock 아이콘 숨김: `export_presets.cfg`의 `application/additional_plist_content`로 `LSUIElement` 넣음.

@@ -837,6 +837,7 @@ func _setup_menu() -> void:
 	# 메뉴바에는 드물게 쓰는 것만 둔다. 나머지는 캐릭터를 클릭하면 옆에 뜨는 그림 버튼으로.
 	NativeMenu.add_item(menu, "화면 아래 가운데로", func(_tag): _reset_position())
 	NativeMenu.add_item(menu, "Claude 키 넣기…", func(_tag): talk.ask_key())
+	NativeMenu.add_item(menu, "업데이트 확인…", func(_tag): talk.check_update())
 	NativeMenu.add_separator(menu)
 	NativeMenu.add_item(menu, "종료", func(_tag): get_tree().quit())
 	var ind := DisplayServer.create_status_indicator(_menu_icon(), "37RHHG", func(_b, _p): pass)

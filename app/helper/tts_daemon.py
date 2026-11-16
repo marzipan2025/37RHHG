@@ -8,6 +8,7 @@
 표준 입력이 닫히면(도우미가 끝나면) 같이 끝난다.
 """
 import json
+import os
 import re
 import sys
 import wave
@@ -26,7 +27,10 @@ try:
     import numpy as np
     from supertonic import TTS
 
-    tts = TTS(auto_download=False)
+    # 스레드를 안 정하면 코어를 다 써서(460%) 같이 틀어 둔 음악이 끊겼다. 2개면 속도는 같고(한 줄 1.1초) 190%.
+    # 우선순위도 낮춰서 다른 앱(음악)이 먼저 CPU 를 받게 한다.
+    os.nice(10)
+    tts = TTS(auto_download=False, intra_op_num_threads=2, inter_op_num_threads=1)
     style = tts.get_voice_style(voice_name=VOICE)
     rate = getattr(tts, "sample_rate", None) or 44100
 except Exception:

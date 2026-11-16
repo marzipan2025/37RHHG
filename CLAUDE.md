@@ -110,7 +110,7 @@
   - 앱이 직접 묻는 "새 버전 vX… 업데이트할까?"와 대답도 대화 기록에 남긴다.
   - 그 질문에 "응/네/좋아…"는 설치, "아니/나중/싫…"은 미루기, 그 밖의 말은 보통 대화로 Claude 에 넘긴다. Claude 는 `update_app` 도구(아무 때나 "업데이트 해 줘"에도)로 설치한다. 새 버전이 없으면 앱이 "이게 최신이야"라고 답한다.
 - 시험: 앱 사본의 도우미를 `RHHG_UPDATE_CURRENT_VERSION=0.0.1`로 띄워 `upcheck`·`upinstall`(pid 는 아무 sleep 프로세스)을 보내면 사본이 최신 릴리스로 바뀌고 다시 뜬다(2026-11-15 확인).
-- 릴리스 만들기: `export_presets.cfg`의 `short_version`을 올린 뒤(번호는 사용자에게 물을 것) `zsh packaging/make_dmg.sh` → `build/release/37RHHG-<버전>.dmg`(배경 그림 `packaging/dmg_background.png`, 창 640×480, 앱 (190,242)·응용 프로그램 (450,242)) + `37RHHG-v<버전>.zip`(앱 안 업데이트가 받는 것). `gh release create v<버전> dmg zip --notes-file …`. zip 이 꼭 있어야 업데이트가 된다.
+- 릴리스 만들기: `export_presets.cfg`의 `short_version`을 올린 뒤(번호는 사용자에게 물을 것) `zsh packaging/make_dmg.sh` → `build/release/37RHHG-<버전>.dmg`(배경 그림 `packaging/dmg_background.png`, 창 640×480, 앱 (190,242)·응용 프로그램 (450,242)) + `37RHHG-v<버전>.zip`(앱 안 업데이트가 받는 것). `gh release create v<버전> dmg zip --notes-file …`. zip 이 꼭 있어야 업데이트가 된다. 카카오 빅 산스가 안 깔린 맥(회사 맥)에서는 설치본의 `Contents/Resources/fonts/KakaoBigSans-Regular.ttf`를 꺼내 `RHHG_FONT=<경로> zsh packaging/make_dmg.sh`로 만든다(없으면 시스템 글꼴로 빠진다). v0.1.7 은 회사 맥에서 이렇게 냈다.
 - 앱 아이콘: `swift packaging/make_icon.swift 원본.png app/icon.png`(1024 캔버스 안 824 둥근 사각으로 자름).
 
 ### 프레임 (2026-11-14)

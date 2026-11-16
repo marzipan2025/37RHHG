@@ -15,9 +15,11 @@ godot --headless --path . --export-release "macOS" "$OUT" 2>&1 | grep -E "ERROR"
 # 말 도우미를 실행 파일 옆에 둔다.
 cp helper/bubble "$OUT/Contents/MacOS/bubble"
 # 말풍선 글꼴(카카오 빅 산스 레귤러). 저장소에는 넣지 않고 이 맥에 깔린 파일을 넣는다. 없으면 도우미가 시스템 글꼴을 쓴다.
-if [ -f "$HOME/Library/Fonts/KakaoBigSans-Regular.ttf" ]; then
+# 글꼴이 안 깔린 맥(회사 맥)에서는 RHHG_FONT=<ttf 경로>로 넘긴다(설치본의 Contents/Resources/fonts 에서 꺼내 쓰면 됨).
+FONT="${RHHG_FONT:-$HOME/Library/Fonts/KakaoBigSans-Regular.ttf}"
+if [ -f "$FONT" ]; then
   mkdir -p "$OUT/Contents/Resources/fonts"
-  cp "$HOME/Library/Fonts/KakaoBigSans-Regular.ttf" "$OUT/Contents/Resources/fonts/"
+  cp "$FONT" "$OUT/Contents/Resources/fonts/KakaoBigSans-Regular.ttf"
 else
   echo "경고: KakaoBigSans-Regular.ttf 없음 → 시스템 글꼴"
 fi

@@ -162,6 +162,11 @@ var cam: Camera3D
 # 얼굴 덧그리기(face.gdshader). 서기·걷기는 원래 얼굴.
 # 달리기·점프 때는 감은 눈(^ ^)과 벌린 입이 각각 따로, 가끔 잠깐씩만 나온다.
 var face_mat: ShaderMaterial
+# 캐릭터: "girl"(소녀, 원래 캐릭터) 또는 "frog"(개구리 마법사, frog/). 고른 것은 CHARACTER_FILE 에 남는다.
+const CHARACTER_FILE := "user://character.txt"
+var character := "girl"
+var frog: RefCounted            # frog/frog.gd(개구리일 때만 만든다)
+var char_item := -1             # 메뉴바 메뉴의 캐릭터 토글 항목 번호
 var face_act := 0              # 0 서기·걷기, 1 달리기, 2 점프
 var eyes_left := 0.0           # 감은 눈이 남은 시간
 var mouth_left := 0.0          # 벌린 입이 남은 시간
@@ -174,6 +179,13 @@ var blink_left := 0.0          # 깜빡이며 감고 있는 남은 시간
 func _ready() -> void:
 	snapshot = "--snapshot" in OS.get_cmdline_user_args()
 	demo = "--demo" in OS.get_cmdline_user_args()
+	if FileAccess.file_exists(CHARACTER_FILE):
+		var saved := FileAccess.get_file_as_string(CHARACTER_FILE).strip_edges()
+		if saved in ["girl", "frog"]:
+			character = saved
+	var ci := OS.get_cmdline_user_args().find("--character")
+	if ci >= 0 and ci + 1 < OS.get_cmdline_user_args().size():
+		character = OS.get_cmdline_user_args()[ci + 1]   # 확인용(저장하지 않음)
 	_build_scene()
 	if snapshot:
 		_take_snapshots()
@@ -195,6 +207,11 @@ func _ready() -> void:
 	if "--menu" in args:
 		# 확인용: 1.5초 뒤 그림 버튼 메뉴를 띄우고 그 자리(머리끝, 화면 pt)를 찍는다.
 		get_tree().create_timer(1.5).timeout.connect(func(): _show_menu(); print("menu at ", talk.anchor))
+	if "--switch" in args:
+		# 확인용: 2초 뒤 다른 캐릭터로 바꾸고, 2초 뒤 다시 되돌린다(메뉴바 항목과 같은 함수).
+		var first := character
+		get_tree().create_timer(2.0).timeout.connect(func(): _set_character("frog" if first == "girl" else "girl"); print("switched to ", character))
+		get_tree().create_timer(4.0).timeout.connect(func(): _set_character(first); print("switched back to ", character))
 	if "--greet" in args:
 		# 확인용: 바로 인사하고 진행 상황을 로그에 찍는다.
 		greet_want = true
@@ -240,29 +257,7 @@ func _build_scene() -> void:
 
 	model = Node3D.new()
 	add_child(model)
-	var inst: Node3D = load("res://assets/character.glb").instantiate()
-	model.add_child(inst)
-	var ap := inst.find_children("*", "AnimationPlayer", true, false)
-	for p in ap:
-		p.queue_free()
-	skel = inst.find_children("*", "Skeleton3D", true, false)[0]
-	_fix_leg_weights(inst)
-	# 팔 가중치 수정은 인사(팔을 크게 들 때)에만 맞다. 평소 걷고 뛸 때 쓰면 팔을 뒤로 흔들 때 옷이 찢어져 보인다.
-	# 그래서 고친 메시를 따로 만들어 두고, 인사하는 동안만 바꿔 낀다(팔이 내려와 있을 때 바꾸므로 티가 안 난다).
-	body_mi = inst.find_children("*", "MeshInstance3D", true, false)[0]
-	body_mesh = body_mi.mesh
-	if "--dump-mesh" in OS.get_cmdline_user_args():
-		_dump_mesh()
-		get_tree().quit()
-		return
-	greet_mesh = _load_arm_mesh()
-	if greet_mesh == null:
-		_fix_arm_weights(inst)      # 예전 방식(미리 만든 파일이 없을 때만)
-		greet_mesh = body_mi.mesh
-	body_mi.mesh = body_mesh
-	_matte(inst)   # 재질은 MeshInstance 쪽 덮어쓰기라 메시를 바꿔 껴도 그대로다
-	_cache_bones()
-	_measure_soles()
+	_build_model()
 
 	shadow = MeshInstance3D.new()
 	var quad := QuadMesh.new()
@@ -297,6 +292,69 @@ func _build_scene() -> void:
 	cam_lift_dir = cam_up
 	add_child(cam)
 	cam.look_at(target, Vector3.UP)
+
+
+# 캐릭터 모델을 model 아래에 만든다. 개구리(frog/frog.gd)를 고르면 그쪽에 맡기고, 아래 소녀 부분은 예전 그대로다.
+func _build_model() -> void:
+	if character == "frog":
+		_build_frog()
+		return
+	var inst: Node3D = load("res://assets/character.glb").instantiate()
+	model.add_child(inst)
+	var ap := inst.find_children("*", "AnimationPlayer", true, false)
+	for p in ap:
+		p.queue_free()
+	skel = inst.find_children("*", "Skeleton3D", true, false)[0]
+	_fix_leg_weights(inst)
+	# 팔 가중치 수정은 인사(팔을 크게 들 때)에만 맞다. 평소 걷고 뛸 때 쓰면 팔을 뒤로 흔들 때 옷이 찢어져 보인다.
+	# 그래서 고친 메시를 따로 만들어 두고, 인사하는 동안만 바꿔 낀다(팔이 내려와 있을 때 바꾸므로 티가 안 난다).
+	body_mi = inst.find_children("*", "MeshInstance3D", true, false)[0]
+	body_mesh = body_mi.mesh
+	if "--dump-mesh" in OS.get_cmdline_user_args():
+		_dump_mesh()
+		get_tree().quit()
+		return
+	greet_mesh = _load_arm_mesh()
+	if greet_mesh == null:
+		_fix_arm_weights(inst)      # 예전 방식(미리 만든 파일이 없을 때만)
+		greet_mesh = body_mi.mesh
+	body_mi.mesh = body_mesh
+	_matte(inst)   # 재질은 MeshInstance 쪽 덮어쓰기라 메시를 바꿔 껴도 그대로다
+	_cache_bones()
+	_measure_soles()
+
+
+func _build_frog() -> void:
+	if frog == null:
+		frog = load("res://frog/frog.gd").new()
+	var r: Dictionary = frog.build(model)   # 로브 가중치 다시 정하기까지 약 0.4초(이 맥)
+	skel = r["skel"]
+	body_mi = r["mi"]
+	body_mesh = body_mi.mesh
+	greet_mesh = body_mesh      # 개구리는 인사할 때 바꿔 낄 메시가 없다
+	face_mat = r["mat"]
+	_cache_bones()
+	_measure_soles()
+
+
+# 메뉴바에서 캐릭터를 바꾼다. 모델만 지우고 다시 만들며, 창 위치·돌아다니기·말 걸기는 그대로 이어진다.
+func _set_character(c: String) -> void:
+	if c == character:
+		return
+	character = c
+	var f := FileAccess.open(CHARACTER_FILE, FileAccess.WRITE)
+	if f:
+		f.store_string(c)
+		f.close()
+	for ch in model.get_children():
+		model.remove_child(ch)
+		ch.queue_free()
+	face_mat = null
+	bones = {}
+	_build_model()
+	tint_now = -1.0             # 새 재질에 색을 바로 맞추게
+	bloom_now = -1.0
+	_menu_check()
 
 
 # v: 캐릭터 가슴에서 마우스까지(pt, 화면 좌표라 y 는 아래가 +). blend 1 이면 바로 적용.
@@ -779,10 +837,15 @@ func _apply_hit() -> void:
 
 
 # 창을 win_pos 에 둔다. 메뉴바 위로 올라가야 하면 창은 맨 위에 두고 모자란 만큼 캐릭터를 올려 그린다.
+# 화면에 보이는 키(pt). 개구리는 frog.SIZE 배 크다(소녀는 CHAR_H 그대로).
+func _char_h() -> float:
+	return CHAR_H * (frog.SIZE if character == "frog" else 1.0)
+
+
 func _place() -> void:
 	var top := _usable().position.y
 	var y := maxf(win_pos.y, top)
-	var l := minf(y - win_pos.y, (FEET_Y - CHAR_H) * px_scale)
+	var l := minf(y - win_pos.y, (FEET_Y - _char_h()) * px_scale)
 	DisplayServer.window_set_position(Vector2i(roundi(win_pos.x), roundi(y)))
 	if absf(l - lift) > 0.01:
 		lift = l
@@ -835,6 +898,10 @@ func _setup_menu() -> void:
 	var menu := NativeMenu.create_menu()
 	popup_menu = menu
 	# 메뉴바에는 드물게 쓰는 것만 둔다. 나머지는 캐릭터를 클릭하면 옆에 뜨는 그림 버튼으로.
+	# 캐릭터 토글: 지금이 아닌 쪽을 보여 준다(그림 버튼 메뉴의 토글과 같은 방식).
+	char_item = NativeMenu.add_item(menu, "", func(_tag): _set_character("girl" if character == "frog" else "frog"))
+	_menu_check()
+	NativeMenu.add_separator(menu)
 	NativeMenu.add_item(menu, "화면 아래 가운데로", func(_tag): _reset_position())
 	NativeMenu.add_item(menu, "Claude 키 넣기…", func(_tag): talk.ask_key())
 	NativeMenu.add_item(menu, "업데이트 확인…", func(_tag): talk.check_update())
@@ -844,6 +911,12 @@ func _setup_menu() -> void:
 	indicator = ind
 	DisplayServer.status_indicator_set_menu(ind, menu)
 	print("status indicator ", ind, " feature ", DisplayServer.has_feature(DisplayServer.FEATURE_STATUS_INDICATOR))
+
+
+func _menu_check() -> void:
+	if not popup_menu.is_valid() or char_item < 0:
+		return
+	NativeMenu.set_item_text(popup_menu, char_item, "소녀로 바꾸기" if character == "frog" else "개구리 마법사로 바꾸기")
 
 
 # 목소리를 켜면 머리 꽃핀 가운데가 노랑 → 핫핑크(Haiku·Sonnet 공통). 머리 색처럼 TINT_TIME 에 걸쳐 바뀐다.
@@ -1415,6 +1488,8 @@ func _process(dt: float) -> void:
 			jh = LEAP_H
 		else:
 			j = sin(PI * jump_u)
+	if character == "frog":
+		jh = minf(jh, FEET_Y - _char_h() - 2.0)   # 개구리는 커서 높이 뛰면 모자 끝이 창 위로 잘린다
 	var u := maxf(jump_u, 0.0)
 	model.position.y = jh * k * 4.0 * u * (1.0 - u)
 	shadow.scale = Vector3.ONE * (1.0 - 0.4 * maxf(j, leap))
@@ -1440,7 +1515,7 @@ func _process(dt: float) -> void:
 	if MOUSE_LIGHT:
 		_light_step(dt)
 	# 말풍선 도우미는 화면 pt(왼쪽 위 원점)로 받는다.
-	talk.anchor = (_feet() - Vector2(0, lift + (CHAR_H + 4.0) * px_scale)) / screen_scale + origin
+	talk.anchor = (_feet() - Vector2(0, lift + (_char_h() + 4.0) * px_scale)) / screen_scale + origin
 	talk.feet_y = _feet().y / screen_scale + origin.y
 	_hover_step()
 	_click_step(dt)
@@ -1588,6 +1663,10 @@ func _rot(name: String, axis: Vector3, deg: float, extra := Quaternion.IDENTITY)
 ## w: 걷기 비중(0 대기 ~ 1 걷기), run: 달리기 비중, ph: 걸음 주기(0~1), t: 시간,
 ## j: 제자리 점프 웅크림(0~1), leap: 멀리뛰기 다리 벌림(0~1)
 func _pose(w: float, run: float, ph: float, t: float, j: float, leap := 0.0) -> void:
+	if character == "frog":
+		frog.pose(skel, ph, w, run, t, j, leap, greet, greet_wave, look)
+		_face_update()
+		return
 	var a0 := TAU * ph
 	var idle := 1.0 - w
 	var breath := sin(t * TAU * 0.35)

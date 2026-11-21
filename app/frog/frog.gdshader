@@ -2,7 +2,7 @@
 // (head_inv·blink·happy·tint·bloom). 입(mouth)은 개구리에 없어서 받아도 쓰지 않는다.
 // - 눈 깜빡임: 개구리 눈은 머리 위로 튀어나온 공이라 눈알 공 위에 위·아래 눈꺼풀을 칠한다.
 //   소녀의 웃는 눈(happy)도 감은 눈으로 대신한다.
-// - tint(말 모델이 Sonnet): 의상(모자·로브) 보라 → 핑크.
+// - tint(말 모델이 Sonnet): 의상(모자·로브) 보라 → 검정, 의상의 노란(금) 장식 → 터키색(2026-11-22, 처음엔 핑크, 그다음 밝은 금색).
 // - bloom(목소리 켬): 옆구리 유리병 물약 → 노랑. 병 자리는 frog.gd 가 정점 색 파랑 0 으로 표시해 둔다.
 // 머리 좌표: main.gd _face_update 의 틀(머리 뼈 원점, 캐릭터 왼쪽·위·앞, 월드 단위)을 unit_scale 로 모델 단위로 바꿔 cm 로 쓴다.
 shader_type spatial;
@@ -27,7 +27,13 @@ uniform bool debug = false;            // 눈알 판정 자리를 빨강으로
 // 의상은 색상 0.68~0.80·명도 0.5 이하. 물약 병은 같은 보라~분홍이지만 명도 0.6 이상이라 빠진다.
 uniform float tint = 0.0;
 uniform vec3 tint_from : source_color = vec3(0.24, 0.17, 0.42);   // 의상 보라(색상 0.73)
-uniform vec3 tint_to : source_color = vec3(0.86, 0.30, 0.62);     // 핑크
+uniform vec3 tint_black : source_color = vec3(0.10, 0.095, 0.11); // 검정(원래 보라 가장 밝은 곳이 이 색, 그늘은 비율대로 더 어둡게)
+uniform float gold_from_h = 0.095;     // 의상 금 장식 색상(모자 띠·테두리·자수, 0.08~0.11)
+uniform float gold_w = 0.035;
+uniform vec3 gold_to : source_color = vec3(0.19, 0.85, 0.80);     // 터키색(2026-11-22, 처음엔 밝은 금색 1.0, 0.84, 0.32)
+uniform float gold_gain = 1.1;         // 밝기 올림(금색일 땐 1.35, 터키색은 형광처럼 떠서 1.1)
+uniform float face_lo = -1.5;          // 금색에서 뺄 얼굴 높이(머리 좌표 cm): 입선 y≈4.7, 눈 흰자 y 8~14
+uniform float face_hi = 12.5;
 uniform bool tint_debug = false;
 
 // 유리병 물약 색: 원래 하늘색~보라~분홍 그라데이션을 노랑 쪽으로 모으되 색상 차이를 bloom_spread 만큼 남긴다.
@@ -88,21 +94,23 @@ void fragment() {
 	if (tint > 0.001 || tint_debug) {
 		vec3 h = rgb2hsv(c);
 		vec3 hf = rgb2hsv(tint_from);
-		vec3 ht = rgb2hsv(tint_to);
+		// 의상(모자·로브) 보라 → 검정. 명도 비율은 남겨 주름이 보이게 한다.
 		float w = (1.0 - smoothstep(0.06, 0.09, abs(hue_diff(h.x, hf.x))))
 			* smoothstep(0.18, 0.28, h.y) * (1.0 - smoothstep(0.5, 0.6, h.z));
+		// 의상의 노란(금) 장식 → gold_to(터키색). 얼굴(주황 입선·눈 흰자)과 유리병(정점 색 파랑 0)은 뺀다.
+		// 벨트·신발·코르크 같은 갈색은 명도가 낮아 빠진다.
+		bool face = hp.y > face_lo && hp.y < face_hi && hp.z > -6.0 && abs(hp.x) < 17.0;
+		float g = (1.0 - smoothstep(gold_w, gold_w + 0.025, abs(hue_diff(h.x, gold_from_h))))
+			* smoothstep(0.3, 0.42, h.y) * smoothstep(0.3, 0.42, h.z)
+			* (face ? 0.0 : 1.0) * step(0.5, COLOR.b);
 		if (tint_debug) {
 			c = mix(c, vec3(0.0, 1.0, 0.0), w * 0.8);
+			c = mix(c, vec3(1.0, 0.0, 1.0), g * 0.8);
 		} else {
-			float dh = hue_diff(ht.x, hf.x);
-			vec3 end = hsv2rgb(vec3(fract(h.x + dh), clamp(ht.y + (h.y - hf.y) * 0.5, 0.0, 1.0), h.z * ht.z / hf.z));
-			vec3 oc = hsv2rgb(vec3(fract(h.x + dh * tint), mix(h.y, clamp(ht.y + (h.y - hf.y) * 0.5, 0.0, 1.0), tint), h.z * mix(1.0, ht.z / hf.z, tint)));
-			vec3 lw = vec3(0.299, 0.587, 0.114);
-			float want = mix(dot(c, lw), dot(end, lw), tint);
-			oc *= want / max(dot(oc, lw), 1e-4);
-			float top = max(oc.r, max(oc.g, oc.b));
-			if (top > 1.0) oc = mix(vec3(want), oc, (1.0 - want) / max(top - want, 1e-4));
-			c = mix(c, oc, w);
+			vec3 black = tint_black * (h.z / max(hf.z, 1e-3));
+			c = mix(c, black, w * tint);
+			vec3 gold = hsv2rgb(vec3(rgb2hsv(gold_to).x, mix(h.y, rgb2hsv(gold_to).y, 0.7), clamp(h.z * gold_gain, 0.0, 1.0)));
+			c = mix(c, gold, g * tint);
 		}
 	}
 	vec3 e = vec3(eye_c.x * sign(hp.x), eye_c.yz);

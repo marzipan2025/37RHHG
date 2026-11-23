@@ -43,6 +43,19 @@ uniform vec3 bloom_to : source_color = vec3(0.98, 0.80, 0.16);    // 노랑
 uniform float bloom_spread = 0.12;
 uniform bool bloom_debug = false;
 
+// 소품 들어 보이기(37FRHG preview ⑩ 책·⑪ 유리병): 소품 점은 frog.gd 가 정점 색 빨강(책 0, 병 0.5)으로 표시하고 골반에만 묶어 둔다.
+// book_m·vial_m 은 월드 → 월드 변환(골반에 붙은 지금 자리 → 손에 든 자리). 단위 행렬이면 허리 그대로.
+// 붙어 있던 로브 자리(정점 색 초록 책 0·병 0.5, 알파 = 기본 자세 높이 0.30~0.45 m)는 들고 있는 동안(*_away)
+// 허리띠 높이는 갈색, 나머지는 로브 보라로 덮는다(아래 tint 도 그대로 먹는다).
+uniform mat4 book_m = mat4(1.0);
+uniform mat4 vial_m = mat4(1.0);
+uniform float book_away = 0.0;
+uniform float vial_away = 0.0;
+uniform vec3 vial_in : source_color = vec3(0.50, 0.30, 0.72);   // 병 속(로브에 붙어 있던 뚫린 자리 안쪽 면)
+uniform vec3 robe_col : source_color = vec3(0.17, 0.13, 0.32);
+uniform vec3 belt_col : source_color = vec3(0.25, 0.16, 0.08);
+uniform vec2 belt_y = vec2(0.352, 0.396);
+
 // 마우스 조명(main.gd _light_set 이 방향광 방향·세기를 바꾼다): 개구리 의상은 어두운 보라라 같은 빛에도
 // 명암 차이가 소녀의 절반쯤만 보였다(왼쪽·오른쪽 빛 스냅샷의 밝기 차이 0.031 대 0.057).
 // 방향광만 light_gain 배로 대비를 키운다: 밝은 쪽은 더 밝게, 그늘 쪽은 더 어둡게(평균은 그대로).
@@ -51,6 +64,12 @@ uniform float light_gain = 2.0;
 varying vec3 hp;
 
 void vertex() {
+	if (COLOR.r < 0.75) {
+		mat4 pm = COLOR.r < 0.25 ? book_m : vial_m;
+		vec4 bw = pm * (MODEL_MATRIX * vec4(VERTEX, 1.0));
+		VERTEX = (inverse(MODEL_MATRIX) * bw).xyz;
+		NORMAL = normalize(inverse(mat3(MODEL_MATRIX)) * (mat3(pm) * (mat3(MODEL_MATRIX) * NORMAL)));
+	}
 	vec4 w = MODEL_MATRIX * vec4(VERTEX, 1.0);
 	hp = (head_inv * w).xyz * 100.0 * unit_scale;
 }
@@ -79,6 +98,30 @@ float cover(float d) {
 
 void fragment() {
 	vec3 c = (texture(albedo_tex, UV) * albedo_col).rgb;
+	// frog.gd 가 덧붙인 것: UV x -2 = 앞 병 뒤 로브 구멍 막는 판(로브 보라),
+	// UV x -1 = 병 속을 메우는 공(y = 병 가운데 기준 높이 -1~1): 아래 진보라 → 자홍 → 연보라 → 하늘색(텍스처에서 잰 병 색).
+	if (UV.x < -1.5) {
+		c = robe_col;
+	} else if (UV.x < -0.5) {
+		float t = UV.y;
+		c = mix(vec3(0.29, 0.12, 0.50), vec3(0.45, 0.14, 0.62), smoothstep(-1.0, -0.5, t));
+		c = mix(c, vec3(0.61, 0.24, 0.69), smoothstep(-0.5, -0.15, t));
+		c = mix(c, vec3(0.55, 0.42, 0.70), smoothstep(-0.15, 0.1, t));
+		c = mix(c, vec3(0.30, 0.55, 0.72), smoothstep(0.1, 0.35, t));
+		c = mix(c, vec3(0.22, 0.48, 0.65), smoothstep(0.35, 1.0, t));
+	}
+	// 든 병(빨강 0.5)의 뒷면, 로브 쪽에 칠해져 있던 그늘(어둡고 갈색(코르크·끈)이 아닌 색)은 병 속 색으로 덮는다.
+	if (vial_away > 0.0 && COLOR.r > 0.25 && COLOR.r < 0.75) {
+		vec3 hv = rgb2hsv(c);
+		bool shade = hv.z < 0.3 && !(hv.x > 0.03 && hv.x < 0.16 && hv.y > 0.3);
+		if (!FRONT_FACING || shade) c = mix(c, vial_in, vial_away);
+	}
+	float away = COLOR.g < 0.25 ? book_away : vial_away;
+	if (away > 0.0 && COLOR.r > 0.75 && COLOR.g < 0.75) {
+		float yy = 0.30 + COLOR.a * 0.15;
+		float bw = smoothstep(belt_y.x - 0.003, belt_y.x + 0.003, yy) * (1.0 - smoothstep(belt_y.y - 0.003, belt_y.y + 0.003, yy));
+		c = mix(c, mix(robe_col, belt_col, bw), away);
+	}
 	if ((bloom > 0.001 || bloom_debug) && COLOR.b < 0.5) {
 		vec3 h = rgb2hsv(c);
 		vec3 ht = rgb2hsv(bloom_to);
